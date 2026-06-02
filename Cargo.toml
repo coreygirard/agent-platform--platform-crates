@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "platform-lambda",
+    "platform-http-error",
+    "platform-chirp-auth",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/coreygirard/agent-platform--platform-crates"
+
+[workspace.dependencies]
+axum = "0.8"
+http = "1"
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net"] }
+tower = { version = "0.5", features = ["util"] }
+lambda_http = "1"
+axum-aws-lambda = "0.11"
+chirp-auth-client = { git = "https://github.com/coreygirard/chirp-auth-client", tag = "v0.7.0" }
+uuid = { version = "1", features = ["v4"] }
+async-trait = "0.1"

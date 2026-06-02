@@ -1,0 +1,26 @@
+[package]
+name = "platform-chirp-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared chirp-auth glue: bearer extraction, dev trusted-header decoder, header constants, generic on-behalf-of grant resolution."
+
+[features]
+# Enables the trusted-headers auth decoder at runtime so an integration-test
+# harness (which spawns the release binary) can opt in via the service's
+# `*_TRUSTED_HEADER_AUTH=true` env var. Without this feature the decoder is
+# still compiled (it's a pure function), but a production backend never calls
+# it unless it explicitly threads this feature through — keep the gate at the
+# call site, as the backends do.
+dev-trusted-headers = []
+
+[dependencies]
+http = { workspace = true }
+chirp-auth-client = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
+platform-http-error = { path = "../platform-http-error" }
+
+[dev-dependencies]
+tokio = { workspace = true }

@@ -1,0 +1,15 @@
+[package]
+name = "platform-http-error"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Canonical ApiError + an IntoResponse that always redacts 5xx bodies."
+
+[dependencies]
+axum = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

@@ -1,0 +1,16 @@
+[package]
+name = "platform-lambda"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared axum-on-Lambda entrypoint: run_lambda, shutdown_signal, init_tracing, serve."
+
+[dependencies]
+axum = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+lambda_http = { workspace = true }
+axum-aws-lambda = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
