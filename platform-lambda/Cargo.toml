@@ -14,3 +14,9 @@ lambda_http = { workspace = true }
 axum-aws-lambda = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+aws-config = { workspace = true }
+aws-sdk-dynamodb = { workspace = true }
+
+[dev-dependencies]
+serde_json = "1"
