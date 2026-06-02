@@ -42,6 +42,10 @@ pub const CAN_WRITE_HEADER: &str = "x-user-can-write";
 /// Maximum length, in characters, of a trusted-header `uid`/`agent_id`. Caps
 /// the size of an attacker-influenced identifier and rejects pathological
 /// inputs before they reach the store.
+///
+/// Gated with the trusted-header decoder it serves, so it does not linger in a
+/// normal release build.
+#[cfg(any(test, feature = "dev-trusted-headers"))]
 const MAX_ID_CHARS: usize = 128;
 
 // ---- Trusted-header dev decoder ----------------------------------------
@@ -67,6 +71,10 @@ pub struct TrustedHeaderUser {
 /// Validate a trusted-header identifier: non-empty after trim, at most
 /// [`MAX_ID_CHARS`] characters, and free of control characters. Returns the
 /// trimmed value, or `Unauthorized` on violation.
+///
+/// Gated with [`decode_trusted_headers`]: it is the only caller, and the dev
+/// bypass must not exist in a normal release build.
+#[cfg(any(test, feature = "dev-trusted-headers"))]
 fn validated_id(raw: &str) -> Result<String, ApiError> {
     let trimmed = raw.trim();
     if trimmed.is_empty()
@@ -86,6 +94,15 @@ fn validated_id(raw: &str) -> Result<String, ApiError> {
 ///
 /// Returns `Unauthorized` when `x-user-id` is missing/empty or any provided
 /// id fails validation.
+///
+/// # Safe by construction
+///
+/// This function — the dev/integration-test auth bypass — is compiled only
+/// under `test` or the `dev-trusted-headers` feature. In a normal release
+/// build it does not exist, so a consumer that forgets to gate its call site
+/// gets a missing-symbol compile error instead of silently shipping a
+/// production auth bypass.
+#[cfg(any(test, feature = "dev-trusted-headers"))]
 pub fn decode_trusted_headers(
     headers: &http::HeaderMap,
 ) -> Result<TrustedHeaderUser, ApiError> {

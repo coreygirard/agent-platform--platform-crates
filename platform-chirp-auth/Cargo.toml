@@ -1,18 +1,23 @@
 [package]
 name = "platform-chirp-auth"
-version.workspace = true
+# Explicit version (not inherited) so this crate can advance to 0.2.0 — the
+# trusted-header dev decoder is now compile-gated, a breaking change for any
+# consumer that called it ungated — while platform-lambda and
+# platform-http-error stay at the workspace's 0.1.0.
+version = "0.2.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Shared chirp-auth glue: bearer extraction, dev trusted-header decoder, header constants, generic on-behalf-of grant resolution."
 
 [features]
-# Enables the trusted-headers auth decoder at runtime so an integration-test
-# harness (which spawns the release binary) can opt in via the service's
-# `*_TRUSTED_HEADER_AUTH=true` env var. Without this feature the decoder is
-# still compiled (it's a pure function), but a production backend never calls
-# it unless it explicitly threads this feature through — keep the gate at the
-# call site, as the backends do.
+# Compiles the trusted-headers auth decoder (`decode_trusted_headers` and its
+# private validation helper) so an integration-test harness — which spawns the
+# release binary and opts in via the service's `*_TRUSTED_HEADER_AUTH=true` env
+# var — can use it. Without this feature the decoder DOES NOT EXIST: it is
+# `#[cfg(any(test, feature = "dev-trusted-headers"))]`, so a normal release
+# build cannot reach the dev auth bypass, and a consumer that forgets to gate
+# its call site fails to compile rather than shipping a production bypass.
 dev-trusted-headers = []
 
 [dependencies]
