@@ -1,23 +1,23 @@
 [package]
 name = "platform-chirp-auth"
-# Explicit version (not inherited) so this crate can advance to 0.2.0 — the
-# trusted-header dev decoder is now compile-gated, a breaking change for any
-# consumer that called it ungated — while platform-lambda and
-# platform-http-error stay at the workspace's 0.1.0.
-version = "0.2.0"
+# Explicit version (not inherited) so this crate can advance independently of
+# platform-lambda / platform-http-error (which stay at the workspace's 0.1.0).
+# 0.2.1 reverts the 0.2.0 compile-gating of decode_trusted_headers: that gate
+# was a mis-design — the function is a neutral header-PARSING primitive used by
+# authenticated impersonation in production (e.g. drive's internal-service
+# token path), not a pure dev bypass. The unauthenticated-trust decision is
+# gated at each backend instead.
+version = "0.2.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Shared chirp-auth glue: bearer extraction, dev trusted-header decoder, header constants, generic on-behalf-of grant resolution."
 
 [features]
-# Compiles the trusted-headers auth decoder (`decode_trusted_headers` and its
-# private validation helper) so an integration-test harness — which spawns the
-# release binary and opts in via the service's `*_TRUSTED_HEADER_AUTH=true` env
-# var — can use it. Without this feature the decoder DOES NOT EXIST: it is
-# `#[cfg(any(test, feature = "dev-trusted-headers"))]`, so a normal release
-# build cannot reach the dev auth bypass, and a consumer that forgets to gate
-# its call site fails to compile rather than shipping a production bypass.
+# Marker feature each backend forwards to gate ITS unauthenticated trusted-header
+# bypass path (the `*_TRUSTED_HEADER_AUTH=true` dev/integration affordance).
+# `decode_trusted_headers` itself is unconditional — it only parses headers and
+# is also used by authenticated impersonation in production.
 dev-trusted-headers = []
 
 [dependencies]

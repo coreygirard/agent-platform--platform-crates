@@ -43,19 +43,16 @@ pub const CAN_WRITE_HEADER: &str = "x-user-can-write";
 /// the size of an attacker-influenced identifier and rejects pathological
 /// inputs before they reach the store.
 ///
-/// Gated with the trusted-header decoder it serves, so it does not linger in a
-/// normal release build.
-#[cfg(any(test, feature = "dev-trusted-headers"))]
 const MAX_ID_CHARS: usize = 128;
 
 // ---- Trusted-header dev decoder ----------------------------------------
 
-/// A request authenticated purely from trusted headers. Produced by
-/// [`decode_trusted_headers`]. This is the dev/integration-test bypass path:
-/// it trusts `x-user-id` et al. without verifying a token, so a backend must
-/// only ever reach it when it has explicitly opted into trusted-header auth
-/// (e.g. behind the `dev-trusted-headers` feature + a `*_TRUSTED_HEADER_AUTH`
-/// env flag, exactly as the backends gate it today).
+/// A request identity decoded from trusted headers (`x-user-id` et al.),
+/// produced by [`decode_trusted_headers`]. The headers carry no proof on their
+/// own, so a backend must establish trust first — either an authenticated
+/// impersonation path (e.g. a verified internal-service token, a production
+/// use) or an explicitly opted-in dev bypass (gated behind the
+/// `dev-trusted-headers` feature + a `*_TRUSTED_HEADER_AUTH` env flag).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustedHeaderUser {
     /// Human user id (`x-user-id`).
@@ -71,10 +68,6 @@ pub struct TrustedHeaderUser {
 /// Validate a trusted-header identifier: non-empty after trim, at most
 /// [`MAX_ID_CHARS`] characters, and free of control characters. Returns the
 /// trimmed value, or `Unauthorized` on violation.
-///
-/// Gated with [`decode_trusted_headers`]: it is the only caller, and the dev
-/// bypass must not exist in a normal release build.
-#[cfg(any(test, feature = "dev-trusted-headers"))]
 fn validated_id(raw: &str) -> Result<String, ApiError> {
     let trimmed = raw.trim();
     if trimmed.is_empty()
@@ -95,14 +88,17 @@ fn validated_id(raw: &str) -> Result<String, ApiError> {
 /// Returns `Unauthorized` when `x-user-id` is missing/empty or any provided
 /// id fails validation.
 ///
-/// # Safe by construction
+/// # Trust is the caller's responsibility
 ///
-/// This function — the dev/integration-test auth bypass — is compiled only
-/// under `test` or the `dev-trusted-headers` feature. In a normal release
-/// build it does not exist, so a consumer that forgets to gate its call site
-/// gets a missing-symbol compile error instead of silently shipping a
-/// production auth bypass.
-#[cfg(any(test, feature = "dev-trusted-headers"))]
+/// This function only *parses* `x-user-id` et al.; it performs no
+/// authentication. It is dual-use: a legitimate caller decodes these headers
+/// only AFTER establishing trust some other way (e.g. drive verifies its
+/// internal-service token first, then decodes the impersonated uid — a
+/// production path), while a dev/integration bypass trusts them with no token
+/// at all. The unauthenticated-trust decision is what each backend gates
+/// behind its `dev-trusted-headers` feature + `*_TRUSTED_HEADER_AUTH` env flag;
+/// the primitive itself is unconditional so authenticated impersonation works
+/// in release builds.
 pub fn decode_trusted_headers(
     headers: &http::HeaderMap,
 ) -> Result<TrustedHeaderUser, ApiError> {
