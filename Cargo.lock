@@ -668,7 +668,7 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 [[package]]
 name = "chirp-auth-client"
 version = "0.7.0"
-source = "git+https://github.com/coreygirard/chirp-auth-client?tag=v0.7.0#a7cbfd3837c70e419ff9ccc6d3aba7c4b0de5be5"
+source = "git+https://github.com/chirpauth/client-rust?tag=v0.7.0#a7cbfd3837c70e419ff9ccc6d3aba7c4b0de5be5"
 dependencies = [
  "base64",
  "http 1.4.1",
