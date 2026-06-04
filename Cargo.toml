@@ -10,7 +10,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/coreygirard/agent-platform--platform-crates"
+repository = "https://github.com/stackwell-labs/shared-rust"
 
 [workspace.dependencies]
 axum = "0.8"
