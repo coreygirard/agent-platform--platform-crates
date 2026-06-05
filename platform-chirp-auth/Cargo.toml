@@ -7,7 +7,7 @@ name = "platform-chirp-auth"
 # authenticated impersonation in production (e.g. drive's internal-service
 # token path), not a pure dev bypass. The unauthenticated-trust decision is
 # gated at each backend instead.
-version = "0.2.1"
+version = "0.2.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
