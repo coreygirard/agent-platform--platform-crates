@@ -7,7 +7,10 @@ name = "platform-chirp-auth"
 # authenticated impersonation in production (e.g. drive's internal-service
 # token path), not a pure dev bypass. The unauthenticated-trust decision is
 # gated at each backend instead.
-version = "0.2.2"
+# 0.2.3 bumps the workspace chirp-auth-client dep v0.7.0 -> v0.9.0 (pairwise
+# subjects, no email in the verified identity). API-compatible here: this crate
+# only re-exports `bearer_token`, which is unchanged.
+version = "0.2.3"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
