@@ -55,7 +55,7 @@ jobs:
         env:
           GIT_TOKEN: ${{ steps.tok.outputs.token }}
         run: |
-          git config --global url."https://x-access-token:${GIT_TOKEN}@github.com/".insteadOf "https://github.com/"
+          git config --global url."https://x-access-token:${GIT_TOKEN}@github.com/stackwell-labs/".insteadOf "https://github.com/stackwell-labs/"
       - name: cargo cache
         uses: Swatinem/rust-cache@v2
         with:
