@@ -1,0 +1,69 @@
+name: rust-test (private deps)
+
+# Reusable workflow: clone private stackwell-labs cross-repo Cargo git deps (via a
+# short-lived stackwell-labs-ci App install token) and run the workspace tests.
+#
+# Call it from a service's test.yml so the private-dep auth lives in ONE place
+# instead of being hand-rolled (and drifting) per service. The caller MUST pass
+# `secrets: inherit` — the App private key is an org secret and a called workflow
+# only receives it when inherited.
+#
+#   jobs:
+#     test:
+#       uses: stackwell-labs/shared-rust/.github/workflows/rust-test.yml@main
+#       with:
+#         private-repos: store-core,vault
+#         working-directory: backend
+#       secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      private-repos:
+        description: 'Comma-separated stackwell-labs private repos to clone (e.g. "store-core,vault").'
+        type: string
+        required: true
+      test-cmd:
+        description: 'Test command to run in working-directory.'
+        type: string
+        default: 'cargo test --no-fail-fast'
+      working-directory:
+        type: string
+        default: '.'
+      extra-cmd:
+        description: 'Optional second command (e.g. a feature-gated type-check). Skipped when empty.'
+        type: string
+        default: ''
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+      - name: install rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: mint private-deps read token
+        id: tok
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.STACKWELL_CI_APP_ID }}
+          private-key: ${{ secrets.STACKWELL_CI_APP_PRIVATE_KEY }}
+          owner: stackwell-labs
+          repositories: ${{ inputs.private-repos }}
+      - name: configure private git deps
+        env:
+          GIT_TOKEN: ${{ steps.tok.outputs.token }}
+        run: |
+          git config --global url."https://x-access-token:${GIT_TOKEN}@github.com/".insteadOf "https://github.com/"
+      - name: cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.working-directory }}
+      - name: test
+        working-directory: ${{ inputs.working-directory }}
+        run: ${{ inputs.test-cmd }}
+      - name: extra check
+        if: ${{ inputs.extra-cmd != '' }}
+        working-directory: ${{ inputs.working-directory }}
+        run: ${{ inputs.extra-cmd }}
