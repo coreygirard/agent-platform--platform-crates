@@ -42,6 +42,23 @@ pub struct Signed {
     pub nonce: String,
 }
 
+/// A signature scheme a [`Verifier`] can accept. The canonical scheme is the
+/// only one a sender should EMIT; `LegacyNoNonce` exists solely so a consumer
+/// can keep verifying a not-yet-migrated sender DURING an expand/contract
+/// rollout (accept both → flip the sender → drop legacy). The two are
+/// cryptographically distinct (different signed strings), so a verifier can
+/// accept both safely: a canonical-signed body can never verify as legacy or
+/// vice-versa, and an attacker cannot "downgrade" one to the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scheme {
+    /// `HMAC(secret, "{timestamp}.{nonce}.{body}")` — requires a nonce. The
+    /// canonical scheme; the only one to emit.
+    Canonical,
+    /// `HMAC(secret, "{timestamp}.{body}")` — no nonce. The pre-canonical
+    /// Pigeon scheme; transitional, consumer-side, never emitted by this crate.
+    LegacyNoNonce,
+}
+
 /// Signs deliveries with one secret under the canonical scheme.
 pub struct Signer<'a> {
     secret: &'a [u8],
@@ -83,11 +100,15 @@ pub struct Presented<'a> {
 }
 
 /// A delivery that passed signature + freshness checks. The `nonce` is returned
-/// so a consumer can record it and reject a replay within the freshness window.
+/// so a consumer can record it and reject a replay within the freshness window
+/// (empty for [`Scheme::LegacyNoNonce`], which has none — dedup on a body field
+/// instead). `scheme` tells the consumer which scheme matched (useful to log
+/// during a migration, or to alert once legacy traffic has stopped).
 #[derive(Debug, Clone)]
 pub struct Verified {
     pub nonce: String,
     pub timestamp: i64,
+    pub scheme: Scheme,
 }
 
 /// Why a delivery failed verification. All variants are fail-closed (reject).
@@ -125,18 +146,24 @@ impl fmt::Display for VerifyError {
 
 impl std::error::Error for VerifyError {}
 
-/// Verifies deliveries with one secret under the canonical scheme.
+/// Verifies deliveries with one secret. Accepts [`Scheme::Canonical`] by
+/// default; a consumer mid-migration can `.also_accept(Scheme::LegacyNoNonce)`
+/// so it verifies a not-yet-flipped sender too, then drop it once the sender is
+/// canonical (the expand/contract rollout — no lockstep deploy window).
 pub struct Verifier<'a> {
     secret: &'a [u8],
     freshness_secs: i64,
+    accepted: Vec<Scheme>,
 }
 
 impl<'a> Verifier<'a> {
-    /// A verifier with the [`DEFAULT_FRESHNESS_SECS`] window.
+    /// A verifier that accepts ONLY the canonical scheme, with the
+    /// [`DEFAULT_FRESHNESS_SECS`] window. This is the end state.
     pub fn new(secret: &'a [u8]) -> Self {
         Self {
             secret,
             freshness_secs: DEFAULT_FRESHNESS_SECS,
+            accepted: vec![Scheme::Canonical],
         }
     }
 
@@ -145,27 +172,61 @@ impl<'a> Verifier<'a> {
         self
     }
 
-    /// Verify a presented delivery against `now_unix` (Unix seconds). Checks, in
-    /// order: all three headers present → signature well-formed → HMAC matches
-    /// (constant-time) → timestamp within the freshness window. On success
-    /// returns the [`Verified`] nonce + timestamp for the caller to dedup.
+    /// Additionally accept `scheme` (in addition to the canonical default).
+    /// Transitional: use during a migration, then remove.
+    pub fn also_accept(mut self, scheme: Scheme) -> Self {
+        if !self.accepted.contains(&scheme) {
+            self.accepted.push(scheme);
+        }
+        self
+    }
+
+    fn accepts(&self, scheme: Scheme) -> bool {
+        self.accepted.contains(&scheme)
+    }
+
+    /// Verify a presented delivery against `now_unix` (Unix seconds). The scheme
+    /// is chosen by nonce-presence — a nonce header means canonical, its absence
+    /// means legacy — constrained to the accepted set. Then: signature
+    /// well-formed → HMAC matches (constant-time, over the chosen scheme's signed
+    /// string) → timestamp within the freshness window. On success returns the
+    /// matched [`Verified`] for the caller to dedup.
+    ///
+    /// Picking by nonce-presence is safe because the schemes sign different
+    /// strings: stripping the nonce header to force the legacy path makes a
+    /// canonical signature fail the legacy MAC (no downgrade), and a legacy
+    /// delivery simply never carries a nonce.
     pub fn verify(&self, p: &Presented<'_>, now_unix: i64) -> Result<Verified, VerifyError> {
         let signature = p.signature.ok_or(VerifyError::MissingSignature)?.trim();
         let timestamp = p.timestamp.ok_or(VerifyError::MissingTimestamp)?.trim();
-        let nonce = p.nonce.ok_or(VerifyError::MissingNonce)?.trim();
+        let nonce = p.nonce.map(str::trim).filter(|n| !n.is_empty());
+
+        // Choose the scheme from nonce-presence, within the accepted set.
+        let scheme = match nonce {
+            Some(_) if self.accepts(Scheme::Canonical) => Scheme::Canonical,
+            // A nonce'd (canonical-shaped) delivery, but this verifier doesn't
+            // accept canonical: reject as a mismatch.
+            Some(_) => return Err(VerifyError::SignatureMismatch),
+            None if self.accepts(Scheme::LegacyNoNonce) => Scheme::LegacyNoNonce,
+            // No nonce and legacy isn't accepted → canonical requires one.
+            None => return Err(VerifyError::MissingNonce),
+        };
 
         let hex = signature
             .strip_prefix("sha256=")
             .ok_or(VerifyError::MalformedSignature)?;
         let expected = hex_decode(hex).ok_or(VerifyError::MalformedSignature)?;
 
-        // Constant-time compare via the MAC's own verifier.
+        // Constant-time compare via the MAC's own verifier, over the chosen
+        // scheme's signed string.
         let mut mac = HmacSha256::new_from_slice(self.secret)
             .expect("HMAC accepts any key length");
         mac.update(timestamp.as_bytes());
         mac.update(b".");
-        mac.update(nonce.as_bytes());
-        mac.update(b".");
+        if scheme == Scheme::Canonical {
+            mac.update(nonce.expect("canonical implies a nonce").as_bytes());
+            mac.update(b".");
+        }
         mac.update(p.body);
         mac.verify_slice(&expected)
             .map_err(|_| VerifyError::SignatureMismatch)?;
@@ -182,8 +243,9 @@ impl<'a> Verifier<'a> {
         }
 
         Ok(Verified {
-            nonce: nonce.to_owned(),
+            nonce: nonce.map(str::to_owned).unwrap_or_default(),
             timestamp: ts,
+            scheme,
         })
     }
 }
@@ -344,5 +406,78 @@ mod tests {
         assert_eq!(hex_decode(&hex_lower(&bytes)).unwrap(), bytes);
         assert!(hex_decode("abc").is_none(), "odd length");
         assert!(hex_decode("zz").is_none(), "non-hex");
+    }
+
+    /// A legacy `{timestamp}.{body}` signature (no nonce) — what a pre-canonical
+    /// sender emitted. The crate never produces this; we forge it for the
+    /// transitional-verify tests.
+    fn legacy_sign(secret: &[u8], timestamp: &str, body: &[u8]) -> String {
+        let mut mac = HmacSha256::new_from_slice(secret).unwrap();
+        mac.update(timestamp.as_bytes());
+        mac.update(b".");
+        mac.update(body);
+        format!("sha256={}", hex_lower(&mac.finalize().into_bytes()))
+    }
+
+    #[test]
+    fn tolerant_verifier_accepts_canonical_and_legacy() {
+        let body = b"body";
+        let tolerant = Verifier::new(SECRET).also_accept(Scheme::LegacyNoNonce);
+
+        // Canonical (nonce present).
+        let signed = Signer::new(SECRET).sign_with(body, "1000", "n");
+        let v = tolerant.verify(&present(&signed, body), 1000).unwrap();
+        assert_eq!(v.scheme, Scheme::Canonical);
+        assert_eq!(v.nonce, "n");
+
+        // Legacy (no nonce header).
+        let sig = legacy_sign(SECRET, "1000", body);
+        let legacy = Presented {
+            signature: Some(&sig),
+            timestamp: Some("1000"),
+            nonce: None,
+            body,
+        };
+        let v = tolerant.verify(&legacy, 1000).unwrap();
+        assert_eq!(v.scheme, Scheme::LegacyNoNonce);
+        assert_eq!(v.nonce, "", "legacy carries no nonce");
+    }
+
+    #[test]
+    fn canonical_only_verifier_rejects_legacy() {
+        let body = b"body";
+        let sig = legacy_sign(SECRET, "1000", body);
+        let legacy = Presented {
+            signature: Some(&sig),
+            timestamp: Some("1000"),
+            nonce: None,
+            body,
+        };
+        // The default verifier accepts canonical only → a no-nonce delivery is
+        // rejected (canonical requires a nonce).
+        assert_eq!(
+            Verifier::new(SECRET).verify(&legacy, 1000).unwrap_err(),
+            VerifyError::MissingNonce
+        );
+    }
+
+    #[test]
+    fn downgrade_canonical_to_legacy_is_rejected() {
+        // A canonical signature presented WITHOUT its nonce header (an attacker
+        // stripping it to force the legacy path) must NOT verify: the legacy MAC
+        // over {ts}.{body} can't match a signature taken over {ts}.{nonce}.{body}.
+        let body = b"body";
+        let signed = Signer::new(SECRET).sign_with(body, "1000", "n");
+        let stripped = Presented {
+            signature: Some(&signed.signature),
+            timestamp: Some(&signed.timestamp),
+            nonce: None,
+            body,
+        };
+        let tolerant = Verifier::new(SECRET).also_accept(Scheme::LegacyNoNonce);
+        assert_eq!(
+            tolerant.verify(&stripped, 1000).unwrap_err(),
+            VerifyError::SignatureMismatch
+        );
     }
 }
