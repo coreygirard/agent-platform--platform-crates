@@ -1,0 +1,15 @@
+[package]
+name = "platform-webhook-sig"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "One canonical webhook signature scheme (HMAC-SHA256 over {timestamp}.{nonce}.{body}) + a freshness-checking verifier, shared by every sender and consumer."
+
+[dependencies]
+hmac = "0.12"
+sha2 = "0.10"
+uuid = { workspace = true }
+
+[dev-dependencies]
+# (none — tests are self-contained)

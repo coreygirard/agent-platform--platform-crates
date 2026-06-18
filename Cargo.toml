@@ -4,6 +4,7 @@ members = [
     "platform-lambda",
     "platform-http-error",
     "platform-chirp-auth",
+    "platform-webhook-sig",
 ]
 
 [workspace.package]
