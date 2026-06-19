@@ -234,6 +234,262 @@ pub async fn apply_on_behalf_of_grant<S: GrantStore + ?Sized>(
     Ok(())
 }
 
+// ---- Shared chirp MACHINE-token verifier --------------------------------
+
+use std::collections::BTreeSet;
+
+use chirp_auth_client::{
+    ChirpAuthConfig, ChirpVerifiedIdentity, Environment, VerifyOptions, verify_chirp_id_token,
+};
+
+/// The chirp **machine-token** verifier config plus the explicit `client_id`
+/// allowlist — the single shared replacement for the byte-identical
+/// `MachineAuth` Drive, Granite, and Spend-Core each hand-rolled.
+///
+/// `chirp-auth-client` deliberately does NOT gate `aud` for machine tokens: a
+/// machine token's `aud` is its own minting client, presentable to any service.
+/// So without naming an accepted set, ANY confidential client in the chirp
+/// environment could mint a machine token and call an internal API. The
+/// allowlist is the only gate on WHICH client may act as an internal caller.
+///
+/// As of chirp-auth-client v0.12.0 the membership check lives INSIDE the lib:
+/// [`verify`] hands the accepted set to
+/// [`VerifyOptions::accept_machine_clients`], and `verify_chirp_id_token`
+/// rejects a non-member machine token with
+/// [`ChirpAuthError::MachineAudienceNotAccepted`](chirp_auth_client::ChirpAuthError::MachineAudienceNotAccepted),
+/// fail-closed on an empty set. We hold the accepted set here only to feed it
+/// into the verify call — never to re-check it by hand.
+#[derive(Clone, Debug)]
+pub struct MachineAuth {
+    config: ChirpAuthConfig,
+    accepted_client_ids: BTreeSet<String>,
+}
+
+/// A verified machine-token caller. Carries everything the three consumers need
+/// to reproduce their current behavior without this crate depending on any of
+/// their environment types (`granite_client::Environment` /
+/// `capability::Environment`):
+///
+/// - `sub` — the machine principal's chirp `sub` (e.g. `agent_xxx`). Drive uses
+///   it as the agent/run id; Granite intentionally ignores it (it names the
+///   acting user via `x-user-id`); Spend-Core uses it as the caller `uid`.
+/// - `owner_sub` — the human chirp-sub who registered the confidential client.
+///   Drive uses it as the resource-owning `uid`.
+/// - `client_id` — the verified, already-allowlisted minting client.
+/// - `environment` — the raw [`chirp_auth_client::Environment`] (provenance:
+///   which keyset verified the token). Each consumer maps this onto its own
+///   trust-env type (Drive → `granite_client::Environment`, Granite →
+///   `capability::Environment`); Spend-Core ignores it.
+/// - `issuer` — the issuer the token verified against. Granite parses this with
+///   its own `deployment_environment_for_issuer` to derive a
+///   `capability::Environment`; the other two ignore it.
+#[derive(Clone, Debug)]
+pub struct VerifiedMachine {
+    pub sub: String,
+    pub owner_sub: String,
+    pub client_id: String,
+    pub environment: Environment,
+    pub issuer: String,
+}
+
+/// Why [`MachineAuth::verify`] did not yield a machine caller.
+///
+/// The two variants exist BECAUSE OF GRANITE: Granite's machine path is an
+/// EITHER/OR dispatcher that must distinguish two outcomes a flat
+/// `Err(Unauthorized)` would conflate —
+///
+/// - [`Rejected`](Self::Rejected) — a *verified machine token* that is a
+///   DEFINITIVE rejection (its `client_id` is not in the allowlist, i.e. the
+///   lib's `MachineAudienceNotAccepted`). This must 401 and must NOT fall
+///   through to any other auth path: a verified non-allowlisted agent is not a
+///   user.
+/// - [`NotMachine`](Self::NotMachine) — the bearer is not a usable machine
+///   token *for this issuer*: a human identity, or any non-allowlist
+///   verification failure (bad signature / iss / exp / environment / malformed).
+///   Granite FALLS THROUGH to its end-user token path on this; the user path
+///   produces the canonical 401 if it too rejects.
+///
+/// Drive and Spend-Core do not branch on the distinction — they collapse both to
+/// [`ApiError::Unauthorized`] via [`into_api_error`](Self::into_api_error),
+/// exactly the `.map_err(|_| Unauthorized)` they have today. Granite matches on
+/// the variant to reproduce its `None` / `Some(Err)` dispatch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MachineAuthError {
+    /// A verified machine token whose `client_id` is not allowlisted — a
+    /// definitive rejection (do not fall through to other auth).
+    Rejected,
+    /// Not a usable machine token for this issuer (human identity, or a
+    /// verification failure) — a caller MAY fall through to another auth path.
+    NotMachine,
+}
+
+impl MachineAuthError {
+    /// Collapse to [`ApiError::Unauthorized`] for consumers (Drive, Spend-Core)
+    /// that do not distinguish the two cases — both are a 401.
+    pub fn into_api_error(self) -> ApiError {
+        ApiError::Unauthorized
+    }
+}
+
+impl From<MachineAuthError> for ApiError {
+    fn from(_: MachineAuthError) -> Self {
+        ApiError::Unauthorized
+    }
+}
+
+impl MachineAuth {
+    /// Build a machine-token verifier for `issuer` gated to `client_ids`.
+    ///
+    /// The accepted set both scopes acceptance (the lib rejects a verified
+    /// machine token whose `client_id` is not a member) and is the config's
+    /// `aud` allowlist (the minting clients), mirroring every consumer's
+    /// `ChirpAuthConfig::with_audiences(issuer, client_ids)` +
+    /// `accepted_client_ids` pairing.
+    pub fn new(issuer: impl Into<String>, client_ids: impl IntoIterator<Item = String>) -> Self {
+        let accepted_client_ids: BTreeSet<String> = client_ids
+            .into_iter()
+            .map(|id| id.trim().to_owned())
+            .filter(|id| !id.is_empty())
+            .collect();
+        let config = ChirpAuthConfig::with_audiences(
+            issuer.into(),
+            accepted_client_ids.iter().cloned(),
+        );
+        Self {
+            config,
+            accepted_client_ids,
+        }
+    }
+
+    /// Build from the process environment, returning `None` (the machine path
+    /// stays OFF, behavior-unchanged) unless BOTH an issuer AND a non-empty
+    /// comma-separated audiences list are present.
+    ///
+    /// `issuer_env_vars` are tried in order, first non-empty wins — this is how
+    /// Granite reproduces its `GRANITE_CHIRP_ISSUER` else `CHIRP_AUTH_ISSUER`
+    /// fallback (pass `&["GRANITE_CHIRP_ISSUER", "CHIRP_AUTH_ISSUER"]`). Drive
+    /// and Spend-Core pass a single-element slice (no fallback), exactly their
+    /// current behavior.
+    ///
+    /// `audiences_env_var` holds the comma-separated accepted CG `client_id`(s);
+    /// blanks are trimmed and dropped, and an all-empty list yields `None`
+    /// (fail-closed off, not fail-closed accepting-nothing — matching every
+    /// consumer's `from_env`).
+    pub fn from_env(issuer_env_vars: &[&str], audiences_env_var: &str) -> Option<Self> {
+        // Match the consumers' `var(primary).or_else(|| var(secondary)).filter(!empty)`
+        // semantics EXACTLY: the first *set* var wins (even if blank — a set-but-blank
+        // primary does NOT fall through to the secondary), then the result must be
+        // non-empty. Filtering empties *inside* the find would wrongly fall a blank
+        // primary through to the secondary, diverging from granite. Single-var
+        // consumers (drive/spend) are unaffected.
+        let issuer = issuer_env_vars
+            .iter()
+            .find_map(|name| std::env::var(name).ok())
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())?;
+        let audiences: Vec<String> = std::env::var(audiences_env_var)
+            .ok()?
+            .split(',')
+            .map(|audience| audience.trim().to_owned())
+            .filter(|audience| !audience.is_empty())
+            .collect();
+        if audiences.is_empty() {
+            return None;
+        }
+        Some(Self::new(issuer, audiences))
+    }
+
+    /// The normalized issuer this verifier roots tokens in. Granite parses this
+    /// (its `…/test/{tenant}` form) to derive a `capability::Environment`.
+    pub fn issuer(&self) -> &str {
+        self.config.issuer()
+    }
+
+    /// The accepted machine `client_id` allowlist — the set fed into the lib's
+    /// gate. Exposed for assertions / introspection; the membership check itself
+    /// is the lib's job (see [`verify_options`](Self::verify_options)).
+    pub fn accepted_client_ids(&self) -> &BTreeSet<String> {
+        &self.accepted_client_ids
+    }
+
+    /// The [`VerifyOptions`] that opt into machine acceptance gated to the
+    /// configured allowlist. The lib enforces the set: a machine token whose
+    /// `client_id` is not a member is rejected, and an empty set accepts no
+    /// machine token (fail-closed). This is the single place the configured set
+    /// crosses into the lib gate, so prod and tests share it.
+    pub fn verify_options(&self) -> VerifyOptions {
+        VerifyOptions::accept_machine_clients(self.accepted_client_ids.iter().cloned())
+    }
+
+    /// Verify a chirp **machine token**, returning the verified machine caller
+    /// or a two-way [`MachineAuthError`] (see that type for why the distinction
+    /// exists — it is Granite's EITHER/OR dispatch).
+    ///
+    /// Outcomes:
+    /// - `Ok(VerifiedMachine)` — a `Machine` identity whose `client_id` is in the
+    ///   configured allowlist (the lib enforces membership).
+    /// - `Err(MachineAuthError::Rejected)` — a *verified* machine token whose
+    ///   `client_id` is NOT allowlisted (the lib's `MachineAudienceNotAccepted`):
+    ///   a definitive 401, never fall-through-eligible.
+    /// - `Err(MachineAuthError::NotMachine)` — a human identity, or any other
+    ///   verification failure (bad signature / iss / exp / environment /
+    ///   malformed): the bearer is not a usable machine token for this issuer, so
+    ///   a caller may fall through to another auth path.
+    ///
+    /// `client` is the caller's pooled `reqwest::Client` (the JWKS fetch reuses
+    /// the connection pool); this crate does not own one.
+    ///
+    /// Drive/Spend-Core treat both error variants as a flat 401 — they call
+    /// `.map_err(MachineAuthError::into_api_error)` (or rely on the `From` impl),
+    /// reproducing their current `.map_err(|_| Unauthorized)`. Granite matches on
+    /// the variant: `Rejected` → `Some(Err(Unauthorized))`, `NotMachine` →
+    /// `None` (fall through to the user-token path).
+    pub async fn verify(
+        &self,
+        client: &reqwest::Client,
+        token: &str,
+    ) -> Result<VerifiedMachine, MachineAuthError> {
+        let verified = match verify_chirp_id_token(
+            client,
+            &self.config,
+            token,
+            self.verify_options(),
+        )
+        .await
+        {
+            Ok(verified) => verified,
+            // A machine token that verified but whose `client_id` is not in the
+            // accepted set — the lib's definitive non-member rejection. This must
+            // NOT be re-treated as a user token by a fall-through dispatcher.
+            Err(chirp_auth_client::ChirpAuthError::MachineAudienceNotAccepted) => {
+                return Err(MachineAuthError::Rejected);
+            }
+            // Any other verification failure (bad sig / iss / exp / env /
+            // malformed). A human token from this issuer still verifies as
+            // `Human` (handled below), so a hard error here means the bearer is
+            // genuinely not a usable token for this issuer — fall-through eligible.
+            Err(_) => return Err(MachineAuthError::NotMachine),
+        };
+        let environment = verified.environment;
+        match verified.identity {
+            ChirpVerifiedIdentity::Machine {
+                sub,
+                owner_sub,
+                client_id,
+            } => Ok(VerifiedMachine {
+                sub,
+                owner_sub,
+                client_id,
+                environment,
+                issuer: self.config.issuer().to_owned(),
+            }),
+            // A human token on the machine path is the wrong identity type, but
+            // it is a VALID token — the caller falls through to its human path.
+            ChirpVerifiedIdentity::Human { .. } => Err(MachineAuthError::NotMachine),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,5 +687,340 @@ mod tests {
         apply_on_behalf_of_grant(&store, &h, &mut ctx).await.unwrap();
         assert_eq!(ctx.uid, "owner_sub_from_token");
         assert_eq!(ctx.approval_grant_id, None);
+    }
+}
+
+// ---- Shared MachineAuth: allowlist plumbing + from_env (no network) ------
+
+#[cfg(test)]
+mod machine_auth_config_tests {
+    use super::MachineAuth;
+    use std::collections::BTreeSet;
+
+    /// The security-critical seam: the configured `client_id` allowlist is fed
+    /// VERBATIM into the lib's machine gate (`VerifyOptions`). The lib owns the
+    /// per-token membership decision (a verified non-member →
+    /// `MachineAudienceNotAccepted`); this proves the set the lib gates on is
+    /// exactly the configured one — the rule Drive/Granite/Spend each used to
+    /// hand-roll.
+    #[test]
+    fn configured_allowlist_is_fed_to_the_lib_gate() {
+        let machine = MachineAuth::new(
+            "https://signin.chirpauth.com",
+            ["cs_live_aaa".to_owned(), "cs_live_bbb".to_owned()],
+        );
+        let options = machine.verify_options();
+        assert!(options.accept_machine, "opted into machine acceptance");
+        assert!(options.accepted_machine_audiences.contains("cs_live_aaa"));
+        assert!(options.accepted_machine_audiences.contains("cs_live_bbb"));
+        // A different confidential client in the same environment — whose machine
+        // token would pass sig/iss/exp and skip the human aud check — is NOT in
+        // the set the lib gates on, so the lib rejects it.
+        assert!(!options.accepted_machine_audiences.contains("cs_live_other"));
+        assert!(!options.accepted_machine_audiences.contains(""));
+
+        let want: BTreeSet<String> =
+            ["cs_live_aaa".to_owned(), "cs_live_bbb".to_owned()].into_iter().collect();
+        assert_eq!(machine.accepted_client_ids(), &want);
+    }
+
+    /// Fail-closed: an empty accepted set feeds the lib an empty
+    /// `accepted_machine_audiences`, which accepts NO machine token. (`from_env`
+    /// returns `None` for an empty list, so this path is unreachable from env —
+    /// but the gate itself must still fail closed.)
+    #[test]
+    fn empty_allowlist_accepts_no_machine_token() {
+        let machine = MachineAuth::new("https://signin.chirpauth.com", Vec::<String>::new());
+        let options = machine.verify_options();
+        assert!(options.accept_machine, "still an opt-in");
+        assert!(
+            options.accepted_machine_audiences.is_empty(),
+            "but with no accepted client_id, the lib admits no machine token"
+        );
+        assert!(machine.accepted_client_ids().is_empty());
+    }
+
+    /// GRANITE ISSUER FALLBACK: `from_env` tries the issuer env vars in order,
+    /// first non-empty wins. This is the prior blocker — Granite reads
+    /// `GRANITE_CHIRP_ISSUER` else `CHIRP_AUTH_ISSUER`. The single-var (Drive /
+    /// Spend) and the missing/off cases are exercised too. `from_env` is the only
+    /// reader of these process-global vars in this module, guarded by clearing
+    /// them around each step.
+    #[test]
+    fn from_env_issuer_fallback_and_off_by_default() {
+        const PRIMARY: &str = "PLATFORM_TEST_GRANITE_CHIRP_ISSUER";
+        const FALLBACK: &str = "PLATFORM_TEST_CHIRP_AUTH_ISSUER";
+        const AUDS: &str = "PLATFORM_TEST_ACCEPTED_MACHINE_AUDIENCES";
+
+        fn clear() {
+            // SAFETY: single-threaded within this #[test]; the only test that
+            // touches these uniquely-named vars.
+            unsafe {
+                std::env::remove_var(PRIMARY);
+                std::env::remove_var(FALLBACK);
+                std::env::remove_var(AUDS);
+            }
+        }
+
+        // Nothing set → off (None), behavior-unchanged.
+        clear();
+        assert!(MachineAuth::from_env(&[PRIMARY, FALLBACK], AUDS).is_none());
+
+        // Issuer present but no audiences → still off.
+        clear();
+        unsafe { std::env::set_var(PRIMARY, "https://signin.chirpauth.com") };
+        assert!(
+            MachineAuth::from_env(&[PRIMARY, FALLBACK], AUDS).is_none(),
+            "issuer without audiences must stay off"
+        );
+
+        // Audiences present but no issuer → still off.
+        clear();
+        unsafe { std::env::set_var(AUDS, "cs_live_aaa") };
+        assert!(
+            MachineAuth::from_env(&[PRIMARY, FALLBACK], AUDS).is_none(),
+            "audiences without an issuer must stay off"
+        );
+
+        // PRIMARY wins when both issuer vars are set (Granite's preference).
+        clear();
+        unsafe {
+            std::env::set_var(PRIMARY, "https://primary.chirpauth.com");
+            std::env::set_var(FALLBACK, "https://fallback.chirpauth.com");
+            std::env::set_var(AUDS, "cs_live_aaa, cs_live_bbb");
+        }
+        let machine = MachineAuth::from_env(&[PRIMARY, FALLBACK], AUDS).expect("configured");
+        assert_eq!(machine.issuer(), "https://primary.chirpauth.com");
+        // Comma-split + trim of the audiences list.
+        assert!(machine.accepted_client_ids().contains("cs_live_aaa"));
+        assert!(machine.accepted_client_ids().contains("cs_live_bbb"));
+
+        // FALLBACK is used only when PRIMARY is UNSET. A set-but-blank PRIMARY does
+        // NOT fall through — it trims to empty and disables the machine path (None),
+        // matching granite's `var(primary).or_else(var(secondary)).map(trim).filter(!empty)`.
+        clear();
+        unsafe {
+            std::env::set_var(PRIMARY, "   "); // set-but-blank
+            std::env::set_var(FALLBACK, "https://fallback.chirpauth.com");
+            std::env::set_var(AUDS, "cs_live_aaa");
+        }
+        assert!(
+            MachineAuth::from_env(&[PRIMARY, FALLBACK], AUDS).is_none(),
+            "set-but-blank primary trims to empty and stays off (does NOT fall back)"
+        );
+
+        // PRIMARY genuinely UNSET → the fallback is used.
+        clear();
+        unsafe {
+            std::env::set_var(FALLBACK, "https://fallback.chirpauth.com");
+            std::env::set_var(AUDS, "cs_live_aaa");
+        }
+        let machine = MachineAuth::from_env(&[PRIMARY, FALLBACK], AUDS).expect("configured");
+        assert_eq!(
+            machine.issuer(),
+            "https://fallback.chirpauth.com",
+            "unset primary falls back to the secondary issuer var"
+        );
+
+        // Single-var form (Drive / Spend: no fallback) behaves identically.
+        clear();
+        unsafe {
+            std::env::set_var(PRIMARY, "https://signin.chirpauth.com");
+            std::env::set_var(AUDS, "cs_live_aaa");
+        }
+        let machine = MachineAuth::from_env(&[PRIMARY], AUDS).expect("configured");
+        assert_eq!(machine.issuer(), "https://signin.chirpauth.com");
+
+        clear();
+    }
+}
+
+// ---- Shared MachineAuth: full verify path against an in-process JWKS -----
+//
+// The cryptographic verify path itself is chirp-auth-client's (and its own
+// tests cover it). These prove only what the SHARED layer adds on top:
+// identity-type dispatch (a Human token on the machine path is rejected), the
+// Environment returned VERBATIM from the lib, the issuer threaded through, and
+// the non-allowlisted-client rejection surfacing as `Unauthorized`.
+
+#[cfg(test)]
+mod machine_auth_verify_tests {
+    use super::{MachineAuth, MachineAuthError, VerifiedMachine};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use chirp_auth_client::Environment;
+    use platform_http_error::ApiError;
+    use rsa::pkcs1v15::SigningKey;
+    use rsa::signature::{RandomizedSigner, SignatureEncoding};
+    use rsa::traits::PublicKeyParts;
+    use rsa::{RsaPrivateKey, RsaPublicKey};
+    use sha2::Sha256;
+    use std::sync::OnceLock;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    const KID: &str = "test-kid-1";
+    const CLIENT_ID: &str = "cs_live_accepted";
+
+    fn keypair() -> &'static RsaPrivateKey {
+        static KEY: OnceLock<RsaPrivateKey> = OnceLock::new();
+        KEY.get_or_init(|| {
+            let mut rng = rand::thread_rng();
+            RsaPrivateKey::new(&mut rng, 2048).expect("generate test RSA key")
+        })
+    }
+
+    fn jwks_body() -> String {
+        let pubkey = RsaPublicKey::from(keypair());
+        let n = URL_SAFE_NO_PAD.encode(pubkey.n().to_bytes_be());
+        let e = URL_SAFE_NO_PAD.encode(pubkey.e().to_bytes_be());
+        format!(r#"{{"keys":[{{"kty":"RSA","kid":"{KID}","alg":"RS256","n":"{n}","e":"{e}"}}]}}"#)
+    }
+
+    async fn start_jwks_server(body: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/jwks.json");
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = match listener.accept().await {
+                    Ok(pair) => pair,
+                    Err(_) => return,
+                };
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let _ = stream.read(&mut buf).await;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        url
+    }
+
+    fn b64(s: &str) -> String {
+        URL_SAFE_NO_PAD.encode(s.as_bytes())
+    }
+
+    fn sign(signing_input: &[u8]) -> Vec<u8> {
+        let signer = SigningKey::<Sha256>::new(keypair().clone());
+        let mut rng = rand::thread_rng();
+        signer.sign_with_rng(&mut rng, signing_input).to_bytes().to_vec()
+    }
+
+    fn make_jwt(claims_json: &str) -> String {
+        let header = format!(r#"{{"alg":"RS256","typ":"JWT","kid":"{KID}"}}"#);
+        let signing_input = format!("{}.{}", b64(&header), b64(claims_json));
+        let sig = sign(signing_input.as_bytes());
+        format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(sig))
+    }
+
+    fn now() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    /// Build a `MachineAuth` accepting `CLIENT_ID` whose JWKS fetch hits the
+    /// in-process server at `jwks_url`.
+    ///
+    /// `MachineAuth::new` derives `jwks_uri = {issuer}/jwks.json` (there is no
+    /// public override — production callers must let it derive). So we set the
+    /// issuer to the server's base (the url minus the trailing `/jwks.json`),
+    /// which makes the derived `jwks_uri` exactly `jwks_url`. The minted token's
+    /// `iss` is then that same base, satisfying the lib's exact-issuer check.
+    fn machine_for(jwks_url: &str) -> MachineAuth {
+        let base = jwks_url.strip_suffix("/jwks.json").expect("jwks url shape");
+        MachineAuth::new(base.to_owned(), [CLIENT_ID.to_owned()])
+    }
+
+    /// ENV VERBATIM + happy path: a well-formed allowlisted machine token from a
+    /// production issuer verifies, the returned `Environment` is exactly what the
+    /// lib derived (`Production`), and `sub`/`owner_sub`/`client_id`/`issuer` are
+    /// threaded through unchanged.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn verifies_machine_token_and_returns_env_verbatim() {
+        let jwks = start_jwks_server(jwks_body()).await;
+        let machine = machine_for(&jwks);
+        let iss = machine.issuer().to_owned();
+        let claims = format!(
+            r#"{{"iss":"{iss}","sub":"agent_xyz","aud":"{CLIENT_ID}","exp":{},"act":"machine","owner_sub":"sub_owner"}}"#,
+            now() + 3600
+        );
+        let token = make_jwt(&claims);
+        let VerifiedMachine {
+            sub,
+            owner_sub,
+            client_id,
+            environment,
+            issuer,
+        } = machine
+            .verify(&reqwest::Client::new(), &token)
+            .await
+            .expect("allowlisted machine token verifies");
+        assert_eq!(sub, "agent_xyz");
+        assert_eq!(owner_sub, "sub_owner");
+        assert_eq!(client_id, CLIENT_ID);
+        // Verbatim from the lib's provenance derivation, not remapped here.
+        assert_eq!(environment, Environment::Production);
+        assert_eq!(issuer, iss);
+    }
+
+    /// HUMAN-TOKEN REJECTION: a valid human token from the same issuer is the
+    /// wrong identity type for the machine path. It is `NotMachine` (a VALID
+    /// token, so a Granite-style caller falls through to its user path), and
+    /// collapses to `Unauthorized` for the simple consumers via `into_api_error`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rejects_human_token_on_machine_path() {
+        let jwks = start_jwks_server(jwks_body()).await;
+        let machine = machine_for(&jwks);
+        let iss = machine.issuer().to_owned();
+        // A human token's `aud` must match the config's accepted set (the lib
+        // gates human `aud`); the accepted set is `CLIENT_ID`, so use it.
+        let claims = format!(
+            r#"{{"iss":"{iss}","sub":"sub_human","aud":"{CLIENT_ID}","exp":{}}}"#,
+            now() + 3600
+        );
+        let token = make_jwt(&claims);
+        let err = machine
+            .verify(&reqwest::Client::new(), &token)
+            .await
+            .expect_err("a human token on the machine path is rejected");
+        // Granite distinguishes this (fall through to the user path); the simple
+        // consumers collapse it to a 401.
+        assert_eq!(err, MachineAuthError::NotMachine);
+        assert!(matches!(err.into_api_error(), ApiError::Unauthorized));
+    }
+
+    /// ALLOWLIST REJECT: a verified machine token whose `client_id` is NOT in the
+    /// accepted set is rejected by the lib gate. This is the DEFINITIVE
+    /// `Rejected` case — a verified-but-not-allowlisted agent must 401 and must
+    /// NOT be re-treated as a user token (Granite's `Some(Err)` outcome).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rejects_non_allowlisted_machine_client() {
+        let jwks = start_jwks_server(jwks_body()).await;
+        let machine = machine_for(&jwks);
+        let iss = machine.issuer().to_owned();
+        // Mint a machine token for a DIFFERENT client_id (its own `aud`), not in
+        // the accepted set. It passes sig/iss/exp but fails the machine gate.
+        let claims = format!(
+            r#"{{"iss":"{iss}","sub":"agent_other","aud":"cs_live_not_accepted","exp":{},"act":"machine","owner_sub":"sub_owner"}}"#,
+            now() + 3600
+        );
+        let token = make_jwt(&claims);
+        let err = machine
+            .verify(&reqwest::Client::new(), &token)
+            .await
+            .expect_err("a non-allowlisted machine client is rejected");
+        assert_eq!(err, MachineAuthError::Rejected);
+        assert!(matches!(err.into_api_error(), ApiError::Unauthorized));
     }
 }

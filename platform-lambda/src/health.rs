@@ -21,7 +21,28 @@
 //! extra `_service-info` fields (drive, for instance, appends `default_limits`)
 //! while still sharing the common core.
 
+use axum::{Json, Router, routing::get};
 use serde::Serialize;
+
+/// An axum [`Router`] serving `GET /health` → `{"service": "<name>", "status":
+/// "ok"}` and nothing else.
+///
+/// This is the canonical health endpoint the ~8 byte-identical services
+/// (drive, granite, loom, pigeon, model-gateway, spend, compute, bowerbird)
+/// each hand-rolled as a one-line handler returning their own `HealthResponse`.
+/// Merge it into a service's app (`app.merge(health_router("drive"))`) to drop
+/// the duplicated handler + response type.
+///
+/// It serves ONLY `/health`. `/healthz` (and any other path) is intentionally
+/// NOT served — a service that wires this in and nothing else for that path
+/// returns 404 for `/healthz`. The per-service `/_service-info` (which carries
+/// extra, service-specific fields) stays owned by each service.
+///
+/// `service` is `'static` because the value is a compile-time constant in every
+/// caller — the same constant the hand-rolled handlers embedded.
+pub fn health_router(service: &'static str) -> Router {
+    Router::new().route("/health", get(move || async move { Json(Health::ok(service)) }))
+}
 
 /// The `GET /health` response: `{"service": "<name>", "status": "ok"}`.
 ///
@@ -95,6 +116,48 @@ mod tests {
     fn health_serializes_to_the_canonical_shape() {
         let json = serde_json::to_value(Health::ok("granite")).unwrap();
         assert_eq!(json, serde_json::json!({"service": "granite", "status": "ok"}));
+    }
+
+    #[tokio::test]
+    async fn health_router_serves_health_with_canonical_body() {
+        use axum::body::to_bytes;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt; // for `oneshot`
+
+        let app = health_router("drive");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json, serde_json::json!({"service": "drive", "status": "ok"}));
+    }
+
+    /// The router serves ONLY `/health`. `/healthz` is intentionally NOT served,
+    /// so a service that wires this in returns 404 for `/healthz`.
+    #[tokio::test]
+    async fn health_router_returns_404_for_healthz() {
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let app = health_router("drive");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[test]

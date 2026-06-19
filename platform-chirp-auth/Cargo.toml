@@ -14,7 +14,13 @@ name = "platform-chirp-auth"
 # the version skew with the services (Drive/Granite) which already pin v0.10.0,
 # so they no longer compile two copies of the token verifier. `bearer_token` is
 # unchanged, so this crate is API-compatible.
-version = "0.2.4"
+# 0.3.0 bumps the workspace chirp-auth-client dep v0.10.0 -> v0.12.0 and adds the
+# shared `MachineAuth` (machine-token verify + the lib-native client_id allowlist
+# gate, an optional issuer-fallback list, and a return shape carrying machine_sub
+# / owner_sub / client_id / chirp Environment / issuer) so Drive/Granite/Spend-Core
+# can drop their hand-rolled copies. New `reqwest` dep (the JWKS fetch the verify
+# call needs); v0.12 types appear in the public API, so this is a minor bump.
+version = "0.3.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -32,7 +38,18 @@ http = { workspace = true }
 chirp-auth-client = { workspace = true }
 uuid = { workspace = true }
 async-trait = { workspace = true }
+reqwest = { workspace = true }
 platform-http-error = { path = "../platform-http-error" }
 
 [dev-dependencies]
 tokio = { workspace = true }
+# Verify-path harness for the shared MachineAuth tests: mint real RS256 tokens
+# against a generated keypair and serve a JWKS from an in-process server, the
+# same approach chirp-auth-client's own verify-path tests use. The crypto path
+# itself is the lib's; these prove the shared layer's identity-type dispatch
+# (reject Human), error->Unauthorized mapping, and env/issuer threading.
+rsa = { version = "0.9", default-features = false, features = ["sha2", "std"] }
+sha2 = "0.10"
+rand = "0.8"
+base64 = "0.22"
+serde_json = "1"
