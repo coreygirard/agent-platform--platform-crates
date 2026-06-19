@@ -34,6 +34,10 @@ use tracing_subscriber::EnvFilter;
 pub mod health;
 pub mod store;
 
+/// Re-export the canonical health endpoint at the crate root so consumers can
+/// `platform_lambda::health_router("drive")` without naming the `health` module.
+pub use health::health_router;
+
 /// Environment variable the Lambda runtime sets. Its presence is how a
 /// process distinguishes "running inside Lambda" from "running locally".
 const AWS_LAMBDA_RUNTIME_API_ENV: &str = "AWS_LAMBDA_RUNTIME_API";
