@@ -673,8 +673,8 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chirp-auth-client"
-version = "0.12.0"
-source = "git+https://github.com/chirpauth/client-rust?tag=v0.12.0#dac360aef57de8cb8220e4f300d4c227b059e26f"
+version = "0.14.0"
+source = "git+https://github.com/chirpauth/client-rust?tag=v0.14.0#b3e0c11bde3b24e06142be5508525a88ba95ee0b"
 dependencies = [
  "base64",
  "http 1.4.1",
@@ -1307,7 +1307,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -1879,7 +1879,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.40",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -1916,7 +1916,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]

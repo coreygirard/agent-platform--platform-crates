@@ -20,6 +20,13 @@ name = "platform-chirp-auth"
 # / owner_sub / client_id / chirp Environment / issuer) so Drive/Granite/Spend-Core
 # can drop their hand-rolled copies. New `reqwest` dep (the JWKS fetch the verify
 # call needs); v0.12 types appear in the public API, so this is a minor bump.
+# 0.3.3 bumps the workspace chirp-auth-client dep v0.12.1 -> v0.14.0 (the canonical
+# client). Two migrations were needed, and every service adopting v0.14 will hit the
+# same two: (1) client v0.13 added `ChirpVerifiedIdentity::Test`, so the machine-path
+# match gained a `Test` arm (a test principal is NotMachine, like Human); (2) client
+# v0.13 made the `typ` header REQUIRED on ID-token verify, so the test fixture mints
+# the real `chirp-id+jwt` typ instead of the generic `JWT`. `bearer_token` +
+# `MachineAuth` public shapes are unchanged.
 version = "0.3.0"
 edition.workspace = true
 license.workspace = true

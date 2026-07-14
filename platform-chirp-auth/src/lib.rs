@@ -483,9 +483,13 @@ impl MachineAuth {
                 environment,
                 issuer: self.config.issuer().to_owned(),
             }),
-            // A human token on the machine path is the wrong identity type, but
-            // it is a VALID token — the caller falls through to its human path.
-            ChirpVerifiedIdentity::Human { .. } => Err(MachineAuthError::NotMachine),
+            // A human or test-environment token on the machine path is the wrong
+            // identity type, but it is a VALID token — the caller falls through to
+            // its human path. (`Test` is a non-machine principal verified against a
+            // test-tenant keyset; added to ChirpVerifiedIdentity in client v0.13.)
+            ChirpVerifiedIdentity::Human { .. } | ChirpVerifiedIdentity::Test { .. } => {
+                Err(MachineAuthError::NotMachine)
+            }
         }
     }
 }
@@ -916,7 +920,11 @@ mod machine_auth_verify_tests {
     }
 
     fn make_jwt(claims_json: &str) -> String {
-        let header = format!(r#"{{"alg":"RS256","typ":"JWT","kid":"{KID}"}}"#);
+        // The typ chirp actually stamps on ID tokens (machine tokens are ID tokens
+        // with act:machine). client v0.13 made this typ REQUIRED on the verify path,
+        // so a fixture minting the generic "JWT" typ is now rejected — mint what the
+        // real issuer does.
+        let header = format!(r#"{{"alg":"RS256","typ":"chirp-id+jwt","kid":"{KID}"}}"#);
         let signing_input = format!("{}.{}", b64(&header), b64(claims_json));
         let sig = sign(signing_input.as_bytes());
         format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(sig))
