@@ -30,6 +30,15 @@ on:
       working-directory:
         type: string
         default: '.'
+      cache-workspaces:
+        description: >-
+          Path passed to rust-cache `workspaces` (where the Cargo workspace +
+          its target/ live). Defaults to working-directory. Set it when cargo is
+          invoked from a member subdir but target/ is at the workspace ROOT — e.g.
+          working-directory=backend with a repo-root [workspace]: pass "." so
+          rust-cache caches ./target, not the empty backend/target.
+        type: string
+        default: ''
       extra-cmd:
         description: 'Optional second command (e.g. a feature-gated type-check). Skipped when empty.'
         type: string
@@ -59,7 +68,9 @@ jobs:
       - name: cargo cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: ${{ inputs.working-directory }}
+          # Cache the dir that actually holds target/ — cache-workspaces when set
+          # (repo-root workspace built from a member subdir), else working-directory.
+          workspaces: ${{ inputs.cache-workspaces != '' && inputs.cache-workspaces || inputs.working-directory }}
       - name: test
         working-directory: ${{ inputs.working-directory }}
         run: ${{ inputs.test-cmd }}
