@@ -43,6 +43,17 @@ on:
         description: 'Optional second command (e.g. a feature-gated type-check). Skipped when empty.'
         type: string
         default: ''
+      rust-toolchain:
+        description: >-
+          Pinned toolchain = the platform MSRV. Floating `stable` meant every
+          service silently re-toolchained on Rust release day: a new rustc or a
+          new clippy lint could turn a green gate red with zero repo changes,
+          and "which Rust does this build with" had no answer. 1.97.0 is the
+          version the whole platform was measured green on (2026-07-18) and is
+          >= the 1.85 floor that the edition-2024 services (granite, drive,
+          social-graph) require. Bump this deliberately, in one place.
+        type: string
+        default: '1.97.0'
 
 jobs:
   test:
@@ -51,7 +62,10 @@ jobs:
       - name: checkout
         uses: actions/checkout@v4
       - name: install rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ inputs.rust-toolchain }}
+          components: clippy, rustfmt
       - name: mint private-deps read token
         id: tok
         uses: actions/create-github-app-token@v1
@@ -78,3 +92,57 @@ jobs:
         if: ${{ inputs.extra-cmd != '' }}
         working-directory: ${{ inputs.working-directory }}
         run: ${{ inputs.extra-cmd }}
+
+      # ---- quality floor: REPORTING ONLY -------------------------------------
+      # No service on the platform is currently clippy- or rustfmt-clean (measured
+      # 2026-07-18: clippy 139/38/50/22/1 unique warnings and rustfmt 1210/97/267/
+      # 307/88 diff hunks for chirp-auth/granite/drive/social-graph/shriek). Gating
+      # these today would turn every repo's gate red at once for pre-existing debt
+      # that has nothing to do with the change under test — so they run
+      # `continue-on-error` and only annotate. That makes the debt VISIBLE and stops
+      # it growing unnoticed, which is the whole point of a floor.
+      #
+      # These run AFTER the tests deliberately: the real signal is never delayed by
+      # a lint pass, and clippy reuses the already-warm target dir.
+      #
+      # To GATE a service once it reaches zero: drop `continue-on-error` here only
+      # when EVERY caller is clean (this workflow is shared by four services), or
+      # move that service's lint step into its own test.yml as a blocking step.
+      - name: clippy (non-blocking)
+        continue-on-error: true
+        working-directory: ${{ inputs.working-directory }}
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: rustfmt (non-blocking)
+        continue-on-error: true
+        working-directory: ${{ inputs.working-directory }}
+        run: cargo fmt --all --check
+
+  # Advisory scan runs as its OWN job, in parallel with `test`, for two reasons:
+  # installing cargo-audit costs minutes and must not sit on the gate's critical
+  # path, and `cargo audit` only needs the committed Cargo.lock — no private-dep
+  # token, no compile. (cargo-audit resolves the lock through the workspace root,
+  # so running from working-directory is correct even when the lock lives in a
+  # parent dir, as it does for granite/drive/shriek.)
+  #
+  # NON-BLOCKING for the same reason as clippy: measured 2026-07-18, granite has 4
+  # open advisories, drive 4, social-graph 8, shriek 3 — mostly a shared
+  # rustls-webpki set plus quinn-proto RUSTSEC-2026-0185 (7.5 high) in drive and
+  # social-graph. Gating would wedge four deploy pipelines on dep bumps that are
+  # not this change. chirp-auth is the exception: it is already advisory-clean and
+  # already gates on audit in its own hand-rolled workflow — that stays BLOCKING.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+      - name: install rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ inputs.rust-toolchain }}
+      - name: install cargo-audit
+        continue-on-error: true
+        run: cargo install --locked cargo-audit
+      - name: cargo audit (non-blocking)
+        continue-on-error: true
+        working-directory: ${{ inputs.working-directory }}
+        run: cargo audit
