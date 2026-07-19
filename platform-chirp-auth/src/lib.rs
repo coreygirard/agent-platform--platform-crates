@@ -978,7 +978,7 @@ mod machine_auth_verify_tests {
         assert_eq!(owner_sub, "sub_owner");
         assert_eq!(client_id, CLIENT_ID);
         // Verbatim from the lib's provenance derivation, not remapped here.
-        assert_eq!(environment, Environment::Production);
+        assert_eq!(environment, Environment::Prod);
         assert_eq!(issuer, iss);
     }
 
