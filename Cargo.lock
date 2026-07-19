@@ -648,6 +648,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "capability"
+version = "0.4.0"
+source = "git+https://github.com/stackwell-labs/capability.git?tag=v0.4.0#c095af348683fd0c643713b09612766628bc12ba"
+
+[[package]]
 name = "cc"
 version = "1.2.63"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -673,10 +678,11 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chirp-auth-client"
-version = "0.14.2"
-source = "git+https://github.com/chirpauth/client-rust?tag=v0.14.2#4e5de3054fbf4ee96ade2d5e57acb7f1b3c5af5b"
+version = "0.15.0"
+source = "git+https://github.com/chirpauth/client-rust?tag=v0.15.0#1d22d3c0389aa329233f3a199d9b6a291051e0ca"
 dependencies = [
  "base64",
+ "capability",
  "http 1.4.1",
  "reqwest",
  "ring",
@@ -1760,7 +1766,7 @@ dependencies = [
 
 [[package]]
 name = "platform-chirp-auth"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "async-trait",
  "base64",
