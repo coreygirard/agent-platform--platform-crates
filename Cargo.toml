@@ -5,6 +5,7 @@ members = [
     "platform-http-error",
     "platform-chirp-auth",
     "platform-webhook-sig",
+    "platform-outbound-guard",
 ]
 
 [workspace.package]

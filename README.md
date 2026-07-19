@@ -40,6 +40,18 @@ Shared chirp-auth request plumbing:
   machine-acting-on-behalf-of-a-human grant resolution, parameterized over a
   per-app grant lookup.
 
+### `platform-outbound-guard`
+The one copy of the outbound-fetch (SSRF / DNS-rebinding) guard for
+requester-supplied URLs. Two decisions: a public-address **allowlist**
+(`ensure_public_ip`) rather than a private-range denylist, so an unenumerated
+reserved range fails closed; and **resolve-then-pin** (`resolve_pinned` ->
+`Destination::client_builder`), which re-resolves the host immediately before
+each attempt, checks every returned address, and pins the client to exactly
+those socket addresses. A create-time URL check alone is not a guarantee — a
+hostname that passed it can later resolve to 169.254.169.254. Extracted from
+chirp-auth's `messaging.rs`; granite previously carried a create-time-only
+denylist with no resolution at all.
+
 ## Building
 
 ```sh

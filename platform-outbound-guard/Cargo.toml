@@ -1,0 +1,18 @@
+[package]
+name = "platform-outbound-guard"
+# Explicit version (not inherited) so this crate can advance independently of
+# platform-lambda / platform-http-error (which stay at the workspace's 0.1.0).
+# 0.1.0 is the initial extraction of chirp-auth's webhook SSRF guard.
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The canonical outbound-fetch (SSRF / DNS-rebinding) guard: a public-address ALLOWLIST plus resolve-then-pin, so a user-supplied URL can never reach an internal address."
+
+[dependencies]
+reqwest = { workspace = true }
+tokio = { workspace = true }
+url = "2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util"] }
