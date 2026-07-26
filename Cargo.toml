@@ -6,6 +6,7 @@ members = [
     "platform-chirp-auth",
     "platform-webhook-sig",
     "platform-outbound-guard",
+    "platform-drive-deposit",
 ]
 
 [workspace.package]
@@ -30,3 +31,6 @@ chirp-auth-client = { git = "https://github.com/chirpauth/client-rust", tag = "v
 uuid = { version = "1", features = ["v4"] }
 async-trait = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = "1"
+base64 = "0.22"
+store-core = { git = "https://github.com/stackwell-labs/store-core.git", tag = "v0.5.0", features = ["blake3"] }
