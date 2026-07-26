@@ -1,0 +1,12 @@
+[package]
+name = "platform-notary"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The notary signing seam for third-party apps: a local Ed25519 (dev/test) or KMS-custodied ES256 (prod) key behind one enum, producing attestation-envelope detached-JWS attestations over any AttestableCore."
+
+[dependencies]
+attestation-envelope.workspace = true
+serde_json.workspace = true
+anyhow = "1"

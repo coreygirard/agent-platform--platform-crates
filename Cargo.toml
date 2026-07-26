@@ -7,6 +7,8 @@ members = [
     "platform-webhook-sig",
     "platform-outbound-guard",
     "platform-drive-deposit",
+    "platform-sg-graph-client",
+    "platform-notary",
 ]
 
 [workspace.package]
@@ -34,3 +36,4 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde_json = "1"
 base64 = "0.22"
 store-core = { git = "https://github.com/stackwell-labs/store-core.git", tag = "v0.5.0", features = ["blake3"] }
+attestation-envelope = { git = "https://github.com/stackwell-labs/attestation-envelope.git", tag = "v0.3.0", features = ["kms"] }
