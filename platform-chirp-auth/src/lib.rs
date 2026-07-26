@@ -24,6 +24,22 @@ use uuid::Uuid;
 /// `None` when the header is absent / non-bearer / empty.
 pub use chirp_auth_client::bearer_token;
 
+/// Re-export the chirp-auth-client verification surface so a relying party that
+/// already depends on `platform-chirp-auth` (for the grant/machine helpers) can
+/// consume the whole ChirpAuth API through THIS crate and drop its own direct
+/// `chirp-auth-client` dependency. A service that depends on both directly and
+/// transitively can otherwise pin two different tags → two incompatible copies
+/// of every chirp type (the `ApiError`/`ChirpAuthConfig` mismatch that bit the
+/// v0.16.0 cascade). Depending only on `platform-chirp-auth` makes that drift
+/// unrepresentable: there is exactly one `chirp-auth-client`, the version THIS
+/// crate pins, and a bump is a single dependency edit.
+pub use chirp_auth_client::{
+    environment_from_issuer, verify_chirp_id_token, verify_chirp_resource_access_token,
+    verify_from_headers, verify_rs256_jws, ChirpAuthConfig, ChirpAuthError, ChirpVerifiedIdentity,
+    ChirpVerifiedResourceAccess, ChirpVerifiedToken, Claims, Environment, VerifyOptions,
+    ACCESS_TOKEN_TYP, ID_TOKEN_TYP, KEYBIND_TYP,
+};
+
 // ---- Header name constants (single source of truth) --------------------
 
 /// Trusted-header user id. Bypasses token verification — only honored when a
@@ -238,9 +254,6 @@ pub async fn apply_on_behalf_of_grant<S: GrantStore + ?Sized>(
 
 use std::collections::BTreeSet;
 
-use chirp_auth_client::{
-    ChirpAuthConfig, ChirpVerifiedIdentity, Environment, VerifyOptions, verify_chirp_id_token,
-};
 
 /// The chirp **machine-token** verifier config plus the explicit `client_id`
 /// allowlist — the single shared replacement for the byte-identical
