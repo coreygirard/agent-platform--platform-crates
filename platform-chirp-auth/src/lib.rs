@@ -39,6 +39,10 @@ pub use chirp_auth_client::{
     ChirpVerifiedResourceAccess, ChirpVerifiedToken, Claims, Environment, VerifyOptions,
     ACCESS_TOKEN_TYP, ID_TOKEN_TYP, KEYBIND_TYP,
 };
+/// Re-export the machine-token minting module too (client_credentials
+/// `MachineTokenMinter` / `MintConfig`), so a consumer that mints machine tokens
+/// (e.g. murmur) can also drop its direct chirp-auth-client dependency.
+pub use chirp_auth_client::mint;
 
 // ---- Header name constants (single source of truth) --------------------
 
