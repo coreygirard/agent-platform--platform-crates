@@ -44,6 +44,12 @@ pub use chirp_auth_client::{
 /// (e.g. murmur) can also drop its direct chirp-auth-client dependency.
 pub use chirp_auth_client::mint;
 
+/// Hermetic test tokens (local mock JWKS + real RS256 signing) — the
+/// replacement for `decode_trusted_headers`' unauthenticated dev-bypass path
+/// in test suites. See the module doc for usage.
+#[cfg(feature = "testkit")]
+pub mod testkit;
+
 // ---- Header name constants (single source of truth) --------------------
 
 /// Trusted-header user id. Bypasses token verification — only honored when a

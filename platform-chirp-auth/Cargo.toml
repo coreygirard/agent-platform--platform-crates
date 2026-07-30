@@ -27,7 +27,13 @@ name = "platform-chirp-auth"
 # v0.13 made the `typ` header REQUIRED on ID-token verify, so the test fixture mints
 # the real `chirp-id+jwt` typ instead of the generic `JWT`. `bearer_token` +
 # `MachineAuth` public shapes are unchanged.
-version = "0.3.9"
+# 0.4.0 adds the `testkit` module (opt-in `testkit` feature): a local mock
+# JWKS server + real RS256 signing, extracted from chirp-auth-client's own
+# private verify-path test harness into a public, reusable primitive. Exists
+# to replace `decode_trusted_headers`' unauthenticated dev-bypass path in
+# every service's test suite with tokens that exercise the REAL verification
+# code. Additive; nothing existing changes shape.
+version = "0.4.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -39,6 +45,10 @@ description = "Shared chirp-auth glue: bearer extraction, dev trusted-header dec
 # `decode_trusted_headers` itself is unconditional — it only parses headers and
 # is also used by authenticated impersonation in production.
 dev-trusted-headers = []
+# The hermetic-test-token module (`testkit`). Optional so a production
+# dependent never pulls in RSA keygen/signing; every service's `[dev-
+# dependencies]` entry for this crate should enable it.
+testkit = ["dep:rsa", "dep:sha2", "dep:rand", "dep:base64", "dep:tokio"]
 
 [dependencies]
 http = { workspace = true }
@@ -47,6 +57,12 @@ uuid = { workspace = true }
 async-trait = { workspace = true }
 reqwest = { workspace = true }
 platform-http-error = { path = "../platform-http-error" }
+# ── testkit's deps (optional; see the `testkit` feature) ────────────────────
+rsa = { version = "0.9", default-features = false, features = ["sha2", "std"], optional = true }
+sha2 = { version = "0.10", optional = true }
+rand = { version = "0.8", optional = true }
+base64 = { version = "0.22", optional = true }
+tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
@@ -55,6 +71,7 @@ tokio = { workspace = true }
 # same approach chirp-auth-client's own verify-path tests use. The crypto path
 # itself is the lib's; these prove the shared layer's identity-type dispatch
 # (reject Human), error->Unauthorized mapping, and env/issuer threading.
+# Also exercises `testkit` itself, so dev-deps enable that feature.
 rsa = { version = "0.9", default-features = false, features = ["sha2", "std"] }
 sha2 = "0.10"
 rand = "0.8"
