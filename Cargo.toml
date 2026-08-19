@@ -27,8 +27,16 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net
 tower = { version = "0.5", features = ["util"] }
 lambda_http = "1"
 axum-aws-lambda = "0.11"
-aws-config = "1.8.8"
-aws-sdk-dynamodb = "1.95.0"
+# default-features = false drops the SDK's DEFAULT `rustls` feature, which is the
+# LEGACY TLS stack: it enables aws-smithy-runtime/tls-rustls ->
+# connector-hyper-0-14-x -> aws-smithy-http-client/hyper-014 -> hyper 0.14 ->
+# h2 0.3, and h2 0.3 has no fix for RUSTSEC-2026-0258 (patched only in
+# >= 0.4.16). Every consumer of these crates inherited that advisory.
+# `default-https-client` keeps HTTPS working via the modern aws-lc-rs client,
+# which was already being built alongside the legacy one — so this removes a
+# second TLS stack rather than adding one.
+aws-config = { version = "1.8.8", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"] }
+aws-sdk-dynamodb = { version = "1.95.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
 chirp-auth-client = { git = "https://github.com/chirpauth/client-rust", tag = "v0.16.0" }
 uuid = { version = "1", features = ["v4"] }
 async-trait = "0.1"
@@ -36,4 +44,4 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde_json = "1"
 base64 = "0.22"
 store-core = { git = "https://github.com/stackwell-labs/store-core.git", tag = "v0.5.0", features = ["blake3"] }
-attestation-envelope = { git = "https://github.com/stackwell-labs/attestation-envelope.git", tag = "v0.3.0", features = ["kms"] }
+attestation-envelope = { git = "https://github.com/stackwell-labs/attestation-envelope.git", tag = "v0.4.0", features = ["kms"] }
