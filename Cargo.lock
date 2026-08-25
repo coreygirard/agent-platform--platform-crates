@@ -1846,6 +1846,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "platform-vault-dynamo"
+version = "0.1.0"
+dependencies = [
+ "aws-sdk-dynamodb",
+]
+
+[[package]]
 name = "platform-webhook-sig"
 version = "0.1.0"
 dependencies = [

@@ -9,6 +9,7 @@ members = [
     "platform-drive-deposit",
     "platform-sg-graph-client",
     "platform-notary",
+    "platform-vault-dynamo",
 ]
 
 [workspace.package]
