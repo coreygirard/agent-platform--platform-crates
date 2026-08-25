@@ -58,6 +58,13 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Measured over 607 runs (2026-07-15..08-25): median 4.2 min, p99 7.6, max 9.4.
+    # 20 is >2x the worst ever observed, so it cannot flake a healthy run -- it
+    # exists only to bound a HUNG one. GitHub's default is 360, and on 2026-08-19
+    # a stalled apt mirror rode that default to 361 minutes in this very job path
+    # (drive `web (warden ceremony + parity)`). shared-terraform bounded its
+    # build/deploy jobs the same day (c9b4f11); the test path was missed.
+    timeout-minutes: 20
     steps:
       - name: checkout
         uses: actions/checkout@v4
@@ -85,6 +92,23 @@ jobs:
           # Cache the dir that actually holds target/ — cache-workspaces when set
           # (repo-root workspace built from a member subdir), else working-directory.
           workspaces: ${{ inputs.cache-workspaces != '' && inputs.cache-workspaces || inputs.working-directory }}
+          # SAVE only from the default branch; every ref still RESTORES from it.
+          #
+          # GitHub caps Actions cache at 10 GB per repo and evicts least-recently-
+          # used above that. Measured 2026-08-25: drive 11.67 GB / 24 entries and
+          # agent-platform--tests 10.03 GB / 18 were both over the cap, so those
+          # repos were evicting their own caches and rebuilding cold. A large part
+          # of the pressure was branch-scoped copies that nothing can ever read:
+          # drive held 0.81 GB entries under refs/pull/5/merge and under a feature
+          # branch, and GitHub's cache scoping means a PR's cache is visible only
+          # to that PR. They cost the budget and evict main's entry, which every
+          # branch DOES read.
+          #
+          # Tradeoff, stated: a PR touching Cargo.lock rebuilds the changed deps
+          # each push instead of reusing its own previous save. That is strictly
+          # better than the state above, where the entry it would have reused was
+          # being evicted anyway.
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
       - name: test
         working-directory: ${{ inputs.working-directory }}
         run: ${{ inputs.test-cmd }}
@@ -132,6 +156,9 @@ jobs:
   # already gates on audit in its own hand-rolled workflow — that stays BLOCKING.
   audit:
     runs-on: ubuntu-latest
+    # After the prebuilt install below this job is seconds, not minutes; 10 is a
+    # hang bound, not a budget. Same reasoning as `test` above.
+    timeout-minutes: 10
     steps:
       - name: checkout
         uses: actions/checkout@v4
@@ -139,9 +166,34 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ inputs.rust-toolchain }}
+      # A PREBUILT binary, not a source build. `cargo install --locked
+      # cargo-audit` compiled the tool from scratch on every run of every service:
+      # measured across 327 runs (2026-08-01..25) it was 1,653 minutes -- 18% of
+      # the entire org's Actions spend, and 24% of the recurring load once one-off
+      # hangs are excluded. It was uniform, not occasional (median 320s, p90 333s,
+      # max 362s), and it produced nothing but a binary whose actual `cargo audit`
+      # then takes 0.02 min. The audit job's median (5.7 min) was LARGER than the
+      # test job's (4.2 min): the advisory scan cost more than the tests.
+      #
+      # An earlier pass moved this into its own parallel job so it would not sit on
+      # the gate's critical path (see the comment above). That fixed WALL-CLOCK.
+      # Billing is per job-minute, so it changed the cost by exactly zero -- a
+      # latency fix asked to do a cost job.
+      #
+      # Same tool, same version resolution, same advisories: nothing is traded
+      # away. drive's mutants.yml already installs cargo-mutants exactly this way.
+      #
+      # continue-on-error is LOAD-BEARING, not decoration. Callers wire this
+      # workflow in as `needs: [test, ...]`, and a reusable workflow's result is
+      # the aggregate of its jobs -- so an install failure here would fail the
+      # `audit` job, fail the called workflow, and wedge every deploy on a
+      # NON-BLOCKING advisory scan. The `cargo install` line this replaces carried
+      # the same flag for the same reason.
       - name: install cargo-audit
         continue-on-error: true
-        run: cargo install --locked cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
       - name: cargo audit (non-blocking)
         continue-on-error: true
         working-directory: ${{ inputs.working-directory }}
