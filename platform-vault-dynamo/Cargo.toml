@@ -1,0 +1,12 @@
+[package]
+name = "platform-vault-dynamo"
+# Explicit version (not inherited) so this crate advances independently.
+# 0.1.0 is the initial extraction, prompted by a production incident.
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A DynamoDB handle for the hardened data-plane vault that CANNOT express a delete. The vault's runtime roles withhold DeleteItem by design; this makes that a compile error instead of a production 500."
+
+[dependencies]
+aws-sdk-dynamodb = { workspace = true }
