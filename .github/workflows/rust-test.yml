@@ -43,6 +43,30 @@ on:
         description: 'Optional second command (e.g. a feature-gated type-check). Skipped when empty.'
         type: string
         default: ''
+      setup-cmd:
+        description: >-
+          Optional command run BEFORE test-cmd, in working-directory. Skipped
+          when empty. Exists so a service whose tests need a live dependency can
+          adopt this workflow instead of hand-rolling a whole copy of it:
+          chirp-auth starts DynamoDB-Local and exports its endpoint via
+          $GITHUB_ENV, which only works as a step in the SAME job as the tests.
+          Writes to $GITHUB_ENV from here are visible to test-cmd, by design.
+        type: string
+        default: ''
+      audit-blocking:
+        description: >-
+          Whether `cargo audit` FAILS the gate. Default false, matching the
+          comment on the audit job: most services carry open advisories in shared
+          transitive deps, and gating there would wedge four deploy pipelines on
+          bumps unrelated to the change under test.
+          .
+          That comment offered two ways to gate a service that reaches zero --
+          drop continue-on-error for EVERYONE, or fork the workflow. Both are
+          bad: one wedges the others, the other is how chirp-auth ended up
+          maintaining a private copy that re-accumulated every defect this
+          workflow had already fixed. Per-caller is the third option.
+        type: boolean
+        default: false
       rust-toolchain:
         description: >-
           Pinned toolchain = the platform MSRV. Floating `stable` meant every
@@ -109,6 +133,10 @@ jobs:
           # better than the state above, where the entry it would have reused was
           # being evicted anyway.
           save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+      - name: setup
+        if: ${{ inputs.setup-cmd != '' }}
+        working-directory: ${{ inputs.working-directory }}
+        run: ${{ inputs.setup-cmd }}
       - name: test
         working-directory: ${{ inputs.working-directory }}
         run: ${{ inputs.test-cmd }}
@@ -190,11 +218,11 @@ jobs:
       # NON-BLOCKING advisory scan. The `cargo install` line this replaces carried
       # the same flag for the same reason.
       - name: install cargo-audit
-        continue-on-error: true
+        continue-on-error: ${{ !inputs.audit-blocking }}
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit
-      - name: cargo audit (non-blocking)
-        continue-on-error: true
+      - name: cargo audit
+        continue-on-error: ${{ !inputs.audit-blocking }}
         working-directory: ${{ inputs.working-directory }}
         run: cargo audit
