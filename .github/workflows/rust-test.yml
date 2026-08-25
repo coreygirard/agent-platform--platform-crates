@@ -98,13 +98,22 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # Measured over 607 runs (2026-07-15..08-25): median 4.2 min, p99 7.6, max 9.4.
-    # 20 is >2x the worst ever observed, so it cannot flake a healthy run -- it
-    # exists only to bound a HUNG one. GitHub's default is 360, and on 2026-08-19
+    # Measured over 607 runs (2026-07-15..08-25): median 4.2 min, p99 7.6, max 9.4
+    # -- all with a WARM cache, which is what made 20 look like >2x headroom.
+    #
+    # It was not. On 2026-08-25 chirp-auth's first run on this workflow hit a cold
+    # cache and `cargo test` alone took 966s, `extra check` another 206s. The job
+    # was cancelled at the 20-minute bound and the IdP deploy was skipped with it.
+    # The bound was measured against the happy path and then met the unhappy one.
+    #
+    # 40 keeps this a HANG bound (GitHub's default is 360) while surviving a cold
+    # full-workspace compile of the largest caller. A cold run is not a hung run,
+    # and a timeout that cannot tell them apart blocks deploys instead of saving
+    # them. GitHub's default is 360, and on 2026-08-19
     # a stalled apt mirror rode that default to 361 minutes in this very job path
     # (drive `web (warden ceremony + parity)`). shared-terraform bounded its
     # build/deploy jobs the same day (c9b4f11); the test path was missed.
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - name: checkout
         uses: actions/checkout@v4
