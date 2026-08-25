@@ -76,6 +76,12 @@ use aws_sdk_dynamodb::operation::{
     query::builders::QueryFluentBuilder, scan::builders::ScanFluentBuilder,
     update_item::builders::UpdateItemFluentBuilder,
 };
+use aws_sdk_dynamodb::config::http::HttpResponse;
+use aws_sdk_dynamodb::error::SdkError;
+use aws_sdk_dynamodb::operation::transact_write_items::{
+    TransactWriteItemsError, TransactWriteItemsOutput,
+};
+use aws_sdk_dynamodb::types::{ConditionCheck, Put, TransactWriteItem, Update};
 use aws_sdk_dynamodb::Client;
 
 /// # The invariant, as a test
@@ -107,6 +113,31 @@ use aws_sdk_dynamodb::Client;
 /// ```compile_fail
 /// fn forbidden_batch(v: &platform_vault_dynamo::VaultClient) {
 ///     let _ = v.batch_write_item();
+/// }
+/// ```
+///
+/// A transaction can be built from the permitted item kinds:
+///
+/// ```
+/// use platform_vault_dynamo::VaultTransactItem;
+/// use aws_sdk_dynamodb::types::{Put, Update, ConditionCheck};
+/// fn permitted(p: Put, u: Update, c: ConditionCheck) -> Vec<VaultTransactItem> {
+///     vec![
+///         VaultTransactItem::Put(p),
+///         VaultTransactItem::Update(u),
+///         VaultTransactItem::ConditionCheck(c),
+///     ]
+/// }
+/// ```
+///
+/// There is NO `Delete` variant, so a transaction carrying one cannot be
+/// constructed — the rule moved from the operation to the item, which is where
+/// it actually belongs:
+///
+/// ```compile_fail
+/// use platform_vault_dynamo::VaultTransactItem;
+/// fn forbidden(d: aws_sdk_dynamodb::types::Delete) -> VaultTransactItem {
+///     VaultTransactItem::Delete(d)
 /// }
 /// ```
 ///
@@ -154,8 +185,96 @@ impl VaultClient {
         self.inner.update_item()
     }
 
-    // Deliberately absent: delete_item, batch_write_item (it can carry
-    // DeleteRequests), transact_write_items (likewise), delete_table,
-    // update_table, create_table. If a genuine need appears, add the method
-    // AND the IAM action together — never one without the other.
+    /// A transaction that CANNOT contain a delete.
+    ///
+    /// The first version of this crate withheld `transact_write_items`
+    /// wholesale, on the reasoning that a transaction *can* carry a Delete. That
+    /// was the wrong rule, and being wrong had a cost: granite's vault store
+    /// uses four Put/Update-only transactions — the pre-bound create, the claim
+    /// serialization point, approve and deny — where atomicity IS the
+    /// correctness property. It could not adopt this type at all, so it kept a
+    /// raw SDK client, and therefore had NO compile-time protection, including
+    /// against the bare `delete_item` this crate exists to prevent.
+    ///
+    /// That is the only way a type like this fails: not by being circumvented,
+    /// but by being too strict to adopt. An over-broad guard's escape hatch is
+    /// "hold the raw client", which forfeits everything.
+    ///
+    /// The platform's guarantee is "no irreversible destruction", NOT "no
+    /// transactions" — and IAM agrees: `dynamodb:TransactWriteItems` is not a
+    /// real action (AWS Access Analyzer reports it "does not exist", the same
+    /// finding it gives a fabricated one). DynamoDB authorises a transaction
+    /// through its UNDERLYING item actions, so a Put/Update transaction is fully
+    /// permitted by the vault grant, and one carrying a Delete is already
+    /// refused — exactly like a bare delete.
+    ///
+    /// So the ban moves from the operation to the ITEM: [`VaultTransactItem`]
+    /// has no `Delete` variant, which states the real rule exactly.
+    /// NOTE ON SHAPE: this OWNS the send rather than returning the SDK's fluent
+    /// builder. Returning the builder would leave `.transact_items()` reachable,
+    /// so a caller could append a `Delete` after the fact and the item type would
+    /// guarantee nothing — a guard that looks armed and is not. Taking the items
+    /// and sending is what makes `Delete` genuinely unrepresentable here.
+    pub async fn transact_write(
+        &self,
+        items: impl IntoIterator<Item = VaultTransactItem>,
+    ) -> Result<TransactWriteItemsOutput, SdkError<TransactWriteItemsError, HttpResponse>> {
+        let mut req = self.inner.transact_write_items();
+        for item in items {
+            req = req.transact_items(item.into());
+        }
+        req.send().await
+    }
+
+    // Deliberately absent: delete_item, batch_write_item (its DeleteRequest is
+    // the only reason, and unlike a transaction the SDK offers no item type that
+    // excludes it), delete_table, update_table, create_table.
+    //
+    // THE RULE FOR CHANGING THIS LIST: the surface here must be ISOMORPHIC to
+    // the vault role's IAM grant — not stricter, not laxer. Laxer is useless;
+    // stricter is worse than useless, because it drives the raw-client escape
+    // hatch that removes the guarantee entirely. `surface_matches_grant()` below
+    // pins the correspondence so the two cannot drift apart silently.
 }
+
+/// One item in a vault transaction. **There is no `Delete` variant, by
+/// construction** — that is the entire point of the type.
+///
+/// Build the inner SDK types as usual and wrap them here; the wrapper costs
+/// nothing at runtime and makes the forbidden case unrepresentable rather than
+/// merely discouraged.
+#[derive(Debug, Clone)]
+pub enum VaultTransactItem {
+    Put(Put),
+    Update(Update),
+    ConditionCheck(ConditionCheck),
+}
+
+impl From<VaultTransactItem> for TransactWriteItem {
+    fn from(item: VaultTransactItem) -> Self {
+        let b = TransactWriteItem::builder();
+        match item {
+            VaultTransactItem::Put(p) => b.put(p),
+            VaultTransactItem::Update(u) => b.update(u),
+            VaultTransactItem::ConditionCheck(c) => b.condition_check(c),
+        }
+        .build()
+    }
+}
+
+/// The operations this type exposes, as the IAM action names they require.
+///
+/// Kept next to the methods so the two are edited together, and compared against
+/// the vault role's real policy by the platform audit — the grant is stated in
+/// `datastore-iac`'s tenant policies AND here, and duplicated knowledge drifts.
+/// It already has: four tenant policies grant `dynamodb:TransactWriteItems`,
+/// which IAM does not recognise and silently ignores.
+pub const REQUIRED_ACTIONS: &[&str] = &[
+    "dynamodb:GetItem",
+    "dynamodb:BatchGetItem",
+    "dynamodb:Query",
+    "dynamodb:Scan",
+    "dynamodb:DescribeTable",
+    "dynamodb:PutItem",
+    "dynamodb:UpdateItem",
+];
