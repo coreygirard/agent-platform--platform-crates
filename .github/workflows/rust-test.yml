@@ -78,6 +78,22 @@ on:
           social-graph) require. Bump this deliberately, in one place.
         type: string
         default: '1.97.0'
+    secrets:
+      STACKWELL_CI_APP_PRIVATE_KEY:
+        description: >-
+          The stackwell-labs-ci App private key used to mint a read token for the
+          private git deps.
+          .
+          DECLARED so a CROSS-ORG caller can pass it EXPLICITLY. `secrets: inherit`
+          does not cross an organisation boundary: chirpauth/server-dev calling
+          this workflow got `app-id: 3975703` (an org var, which does flow) and
+          then `Error: Input required and not supplied: private-key`. Observed
+          2026-06-10, re-confirmed 2026-08-25 on a branch before changing main --
+          the note in chirp-auth's workflow was right and is still right.
+          .
+          required: false so the eight same-org callers using `secrets: inherit`
+          are unaffected; inherit continues to populate it for them.
+        required: false
 
 jobs:
   test:
