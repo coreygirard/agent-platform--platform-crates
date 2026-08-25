@@ -1,0 +1,49 @@
+name: shared-rust self-test
+
+# THIS REPO HAD NO CI OF ITS OWN.
+#
+# `rust-test.yml` is `workflow_call`-only: a reusable workflow CONSUMED by the
+# service repos. Nothing ran against shared-rust itself, on any event. So a
+# breaking change to the platform's widest-reach crates — every backend links
+# platform-http-error and platform-chirp-auth — was discovered only when some
+# consumer happened to bump its tag, in that consumer's CI, attributed to that
+# consumer's change.
+#
+# Found 2026-08-24 while merging platform-vault-dynamo, which had to go in on a
+# local `cargo test` because there was nothing else to ask.
+#
+# This calls THIS REPO'S OWN reusable workflow, deliberately. It tests the
+# crates and dogfoods the workflow in one pass: if a change to rust-test.yml
+# breaks its consumers, it breaks here first, in the repo that owns it, instead
+# of in five service pipelines at once.
+on:
+  push:
+    branches: ['**']
+    paths-ignore: ['**/*.md', 'README.md']
+  pull_request:
+  workflow_dispatch: {}
+
+concurrency:
+  group: shared-rust-self-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # `--workspace` so every crate is covered, not just the ones a given consumer
+    # happens to link. Doctests come along for lib targets, which is where the
+    # platform-vault-dynamo compile_fail invariants live — the ones asserting a
+    # vault handle cannot express a delete.
+    uses: ./.github/workflows/rust-test.yml
+    with:
+      private-repos: store-core,attestation-envelope
+      working-directory: '.'
+      test-cmd: cargo test --workspace --no-fail-fast
+      # A shared crate breaks consumers through FEATURES as easily as through
+      # code: platform-chirp-auth ships a `testkit` feature that only the test
+      # profiles of other repos turn on, so a default-features-only build can be
+      # green while every consumer's test build is broken.
+      extra-cmd: cargo check --workspace --all-features
+    secrets: inherit
