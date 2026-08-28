@@ -195,15 +195,16 @@ jobs:
         run: cargo fmt --all --check
 
   # Advisory scan runs as its OWN job, in parallel with `test`, so that installing
-  # cargo-audit does not sit on the gate's critical path. (cargo-audit resolves the
-  # lock through the workspace root, so running from working-directory is correct
-  # even when the lock lives in a parent dir, as it does for granite/drive/shriek.)
+  # cargo-audit does not sit on the gate's critical path.
   #
-  # This comment used to also claim `cargo audit` "only needs the committed
-  # Cargo.lock — no private-dep token, no compile", and that was FALSE. It resolves
-  # the manifest first, so a private git dep must be fetchable. Without the token
-  # the scan died before scanning anything and `continue-on-error` reported the job
-  # green — verified in drive's own run 32813036899 (2026-08-25):
+  # Two claims that used to live in this comment were both FALSE, and each one on
+  # its own reduced the scan to nothing while reporting green.
+  #
+  # FALSEHOOD 1: "cargo audit only needs the committed Cargo.lock — no private-dep
+  # token, no compile". It resolves the manifest first, so a private git dep must
+  # be fetchable. Without the token the scan died before scanning anything and
+  # `continue-on-error` reported the job green — verified in drive's own run
+  # 32813036899 (2026-08-25):
   #
   #   error: failed to get `store-core` as a dependency of package `drive-service`
   #     failed to authenticate when downloading repository
@@ -213,6 +214,16 @@ jobs:
   # load-bearing: a 2026-08-28 audit of this gate read it and certified the dead
   # scan as live. The mint + insteadOf steps below are the same two the `test` job
   # runs; keep them in step.
+  #
+  # FALSEHOOD 2, found only once fixing the first one let the scan get further:
+  # "cargo-audit resolves the lock through the workspace root, so running from
+  # working-directory is correct even when the lock lives in a parent dir". It does
+  # not. It reads ./Cargo.lock relative to cwd, and drive's next run said so —
+  # `error: not found: Couldn't load Cargo.lock`. Three callers build from a member
+  # subdir whose lock lives above it (drive, granite, pigeon), so the scan step now
+  # walks UP for the nearest lock and fails loudly if there is none. Note that
+  # `cache-workspaces` is not a usable substitute: granite and pigeon do not set it
+  # and still keep their lock at the repo root.
   #
   # NON-BLOCKING for the same reason as clippy: measured 2026-07-18, granite has 4
   # open advisories, drive 4, social-graph 8, shriek 3 — mostly a shared
@@ -279,4 +290,14 @@ jobs:
       - name: cargo audit
         continue-on-error: ${{ !inputs.audit-blocking }}
         working-directory: ${{ inputs.working-directory }}
-        run: cargo audit
+        run: |
+          # cargo-audit reads ./Cargo.lock; it does NOT walk up to the workspace
+          # root the way cargo does. Find the nearest lock at or above cwd.
+          dir="$PWD"
+          while [ "$dir" != "/" ] && [ ! -f "$dir/Cargo.lock" ]; do dir="$(dirname "$dir")"; done
+          if [ ! -f "$dir/Cargo.lock" ]; then
+            echo "::error::no Cargo.lock at or above $PWD — the advisory scan has nothing to scan"
+            exit 1
+          fi
+          echo "scanning $dir/Cargo.lock"
+          cargo audit --file "$dir/Cargo.lock"
