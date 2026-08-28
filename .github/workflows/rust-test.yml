@@ -194,12 +194,25 @@ jobs:
         working-directory: ${{ inputs.working-directory }}
         run: cargo fmt --all --check
 
-  # Advisory scan runs as its OWN job, in parallel with `test`, for two reasons:
-  # installing cargo-audit costs minutes and must not sit on the gate's critical
-  # path, and `cargo audit` only needs the committed Cargo.lock — no private-dep
-  # token, no compile. (cargo-audit resolves the lock through the workspace root,
-  # so running from working-directory is correct even when the lock lives in a
-  # parent dir, as it does for granite/drive/shriek.)
+  # Advisory scan runs as its OWN job, in parallel with `test`, so that installing
+  # cargo-audit does not sit on the gate's critical path. (cargo-audit resolves the
+  # lock through the workspace root, so running from working-directory is correct
+  # even when the lock lives in a parent dir, as it does for granite/drive/shriek.)
+  #
+  # This comment used to also claim `cargo audit` "only needs the committed
+  # Cargo.lock — no private-dep token, no compile", and that was FALSE. It resolves
+  # the manifest first, so a private git dep must be fetchable. Without the token
+  # the scan died before scanning anything and `continue-on-error` reported the job
+  # green — verified in drive's own run 32813036899 (2026-08-25):
+  #
+  #   error: failed to get `store-core` as a dependency of package `drive-service`
+  #     failed to authenticate when downloading repository
+  #
+  # Three services (drive, granite, pigeon) therefore had an advisory scan that had
+  # never scanned a single advisory, reported as passing. The false comment was
+  # load-bearing: a 2026-08-28 audit of this gate read it and certified the dead
+  # scan as live. The mint + insteadOf steps below are the same two the `test` job
+  # runs; keep them in step.
   #
   # NON-BLOCKING for the same reason as clippy: measured 2026-07-18, granite has 4
   # open advisories, drive 4, social-graph 8, shriek 3 — mostly a shared
@@ -219,6 +232,22 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ inputs.rust-toolchain }}
+      # Same private-dep auth the `test` job does. Without these two steps
+      # `cargo audit` cannot resolve a private git dependency and exits before
+      # scanning — silently, because the scan step is continue-on-error.
+      - name: mint private-deps read token
+        id: tok
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.STACKWELL_CI_APP_ID }}
+          private-key: ${{ secrets.STACKWELL_CI_APP_PRIVATE_KEY }}
+          owner: stackwell-labs
+          repositories: ${{ inputs.private-repos }}
+      - name: configure private git deps
+        env:
+          GIT_TOKEN: ${{ steps.tok.outputs.token }}
+        run: |
+          git config --global url."https://x-access-token:${GIT_TOKEN}@github.com/stackwell-labs/".insteadOf "https://github.com/stackwell-labs/"
       # A PREBUILT binary, not a source build. `cargo install --locked
       # cargo-audit` compiled the tool from scratch on every run of every service:
       # measured across 327 runs (2026-08-01..25) it was 1,653 minutes -- 18% of
