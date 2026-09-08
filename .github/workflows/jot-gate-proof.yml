@@ -1,0 +1,65 @@
+name: Prove Jot publication gate
+on:
+  workflow_dispatch:
+    inputs:
+      jot-ref:
+        description: Immutable harness revision
+        type: string
+        required: true
+      candidate-sha:
+        description: Immutable Jot candidate revision
+        type: string
+        required: true
+      expect-failure:
+        description: Expect the isolated missing-user-context regression
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  candidate:
+    uses: ./.github/workflows/jot-candidate.yml
+    with:
+      jot-ref: ${{ inputs.jot-ref }}
+      candidate-repository: stackwell-labs/jot
+      candidate-sha: ${{ inputs.candidate-sha }}
+    secrets: inherit
+  publication-probe:
+    needs: candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: echo 'The required candidate gate permitted this publication probe.'
+  verify:
+    if: always()
+    needs: [candidate, publication-probe]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: jot-candidate-report
+      - env:
+          EXPECT_FAILURE: ${{ inputs.expect-failure }}
+          CANDIDATE_RESULT: ${{ needs.candidate.result }}
+          PUBLICATION_RESULT: ${{ needs.publication-probe.result }}
+        shell: python
+        run: |
+          import json, os
+          with open('report.json') as f:
+              report = json.load(f)
+          stages = {s['name']: s['status'] for s in report['stages']}
+          if os.environ['EXPECT_FAILURE'] == 'true':
+              assert os.environ['CANDIDATE_RESULT'] == 'failure'
+              assert os.environ['PUBLICATION_RESULT'] == 'skipped'
+              assert stages['fresh passkey sign-in through Jot PKCE'] == 'passed'
+              assert stages['Granite consent and Jot grant linking'] == 'passed'
+              assert stages['create, edit, history, archive, export, and restore'] == 'failed'
+              assert stages['pre-revoke session can read notes'] == 'failed'
+              assert report['status'] == 'failed'
+              print('Proved: the identity regression failed acceptance and publication was skipped.')
+          else:
+              assert os.environ['CANDIDATE_RESULT'] == 'success'
+              assert os.environ['PUBLICATION_RESULT'] == 'success'
+              assert report['status'] == 'passed'
+              print('Proved: the working candidate passed acceptance and publication was permitted.')
