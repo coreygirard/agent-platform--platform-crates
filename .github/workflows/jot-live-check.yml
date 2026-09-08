@@ -1,0 +1,50 @@
+name: Verify Jot after release
+
+on:
+  workflow_call:
+    secrets:
+      STACKWELL_CI_APP_PRIVATE_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: token
+        with:
+          app-id: ${{ vars.STACKWELL_CI_APP_ID }}
+          private-key: ${{ secrets.STACKWELL_CI_APP_PRIVATE_KEY }}
+          owner: stackwell-labs
+          repositories: jot
+      - name: Dispatch and require successful live acceptance
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.token.outputs.token }}
+          script: |
+            const owner = 'stackwell-labs';
+            const repo = 'jot';
+            const workflow_id = 'live-acceptance.yml';
+            const requestId = `${context.repo.owner}-${context.repo.repo}-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT}`;
+            await github.rest.actions.createWorkflowDispatch({ owner, repo, workflow_id, ref: 'main', inputs: {
+              'request-id': requestId,
+              'trigger-repository': `${context.repo.owner}/${context.repo.repo}`,
+              'trigger-sha': context.sha,
+              'trigger-run': String(context.runId),
+            }});
+            const deadline = Date.now() + 15 * 60 * 1000;
+            while (Date.now() < deadline) {
+              const {data} = await github.rest.actions.listWorkflowRuns({ owner, repo, workflow_id, event: 'workflow_dispatch', per_page: 100 });
+              const run = data.workflow_runs.find(run => run.display_title === `jot-live-${requestId}`);
+              if (run?.status === 'completed') {
+                await core.summary.addLink('Live Jot acceptance', run.html_url).write();
+                if (run.conclusion !== 'success') throw new Error(`Live acceptance ${run.conclusion}: ${run.html_url}`);
+                return;
+              }
+              await new Promise(resolve => setTimeout(resolve, 5000));
+            }
+            throw new Error('Timed out waiting for live acceptance; release is unverified');

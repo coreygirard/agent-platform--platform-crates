@@ -1,0 +1,191 @@
+name: Jot candidate acceptance
+
+# Public workflow host permits calls from both stackwell-labs and chirpauth.
+# Private source is checked out with the existing CI App, at explicit SHAs.
+on:
+  workflow_call:
+    inputs:
+      jot-ref:
+        description: Immutable Jot harness revision
+        type: string
+        required: true
+      candidate-repository:
+        type: string
+        required: true
+      candidate-sha:
+        type: string
+        required: true
+    secrets:
+      STACKWELL_CI_APP_PRIVATE_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+      jot: ${{ steps.resolve.outputs.jot }}
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: token
+        with:
+          app-id: ${{ vars.STACKWELL_CI_APP_ID }}
+          private-key: ${{ secrets.STACKWELL_CI_APP_PRIVATE_KEY }}
+          owner: stackwell-labs
+          repositories: jot
+      - uses: actions/checkout@v4
+        with:
+          repository: stackwell-labs/jot
+          ref: ${{ inputs.jot-ref }}
+          token: ${{ steps.token.outputs.token }}
+          persist-credentials: false
+      - id: resolve
+        env:
+          HARNESS_SHA: ${{ inputs.jot-ref }}
+          CANDIDATE_REPOSITORY: ${{ inputs.candidate-repository }}
+          CANDIDATE_SHA: ${{ inputs.candidate-sha }}
+        shell: python
+        run: |
+          import json, os, re
+          assert re.fullmatch(r'[0-9a-f]{40}', os.environ['HARNESS_SHA'])
+          assert re.fullmatch(r'[0-9a-f]{40}', os.environ['CANDIDATE_SHA'])
+          with open('acceptance/revisions.json') as f:
+              services = json.load(f)
+          services['jot'] = dict(repository='stackwell-labs/jot',
+              sha=os.environ['HARNESS_SHA'], binary='journey_server', features='')
+          assert os.environ['CANDIDATE_REPOSITORY'] in [s['repository'] for s in services.values()]
+          for name, service in services.items():
+              if service['repository'] == os.environ['CANDIDATE_REPOSITORY']:
+                  service['sha'] = os.environ['CANDIDATE_SHA']
+              assert re.fullmatch(r'[0-9a-f]{40}', service['sha'])
+              service['name'] = name
+              service['owner'] = service['repository'].split('/')[0]
+          with open('revisions.json', 'w') as f:
+              json.dump(services, f, indent=2)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write('matrix=' + json.dumps({'include': list(services.values())}) + '\n')
+              f.write('jot=' + services['jot']['sha'] + '\n')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jot-candidate-revisions
+          path: revisions.json
+          if-no-files-found: error
+
+  build:
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: source
+        with:
+          app-id: ${{ vars.STACKWELL_CI_APP_ID }}
+          private-key: ${{ secrets.STACKWELL_CI_APP_PRIVATE_KEY }}
+          owner: ${{ matrix.owner }}
+      - uses: actions/create-github-app-token@v1
+        id: deps
+        with:
+          app-id: ${{ vars.STACKWELL_CI_APP_ID }}
+          private-key: ${{ secrets.STACKWELL_CI_APP_PRIVATE_KEY }}
+          owner: stackwell-labs
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repository }}
+          ref: ${{ matrix.sha }}
+          token: ${{ steps.source.outputs.token }}
+          persist-credentials: false
+      - name: Verify checkout and authorize private dependencies
+        env:
+          EXPECTED_SHA: ${{ matrix.sha }}
+          DEPS_TOKEN: ${{ steps.deps.outputs.token }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          git config --global url."https://x-access-token:${DEPS_TOKEN}@github.com/stackwell-labs/".insteadOf https://github.com/stackwell-labs/
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: jot-acceptance-${{ matrix.name }}
+      - name: Build the real router
+        env:
+          SERVICE: ${{ matrix.name }}
+          BINARY: ${{ matrix.binary }}
+          FEATURES: ${{ matrix.features }}
+        run: |
+          set -euo pipefail
+          if [ "$SERVICE" = jot ]; then
+            cargo build --locked --example "$BINARY"
+            source_path="target/debug/examples/$BINARY"
+          else
+            cargo build --locked --bin "$BINARY" --features "$FEATURES"
+            source_path="target/debug/$BINARY"
+          fi
+          mkdir -p out
+          cp "$source_path" "out/$BINARY"
+          strip "out/$BINARY"
+          (cd out && sha256sum "$BINARY" > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jot-candidate-${{ matrix.name }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 2
+
+  journey:
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: token
+        with:
+          app-id: ${{ vars.STACKWELL_CI_APP_ID }}
+          private-key: ${{ secrets.STACKWELL_CI_APP_PRIVATE_KEY }}
+          owner: stackwell-labs
+          repositories: jot
+      - uses: actions/checkout@v4
+        with:
+          repository: stackwell-labs/jot
+          ref: ${{ needs.resolve.outputs.jot }}
+          token: ${{ steps.token.outputs.token }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: jot-candidate-*
+          path: bins
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm --prefix web ci
+      - run: cd web && npx playwright install --with-deps chromium
+      - run: npm --prefix web run build
+      - name: Run candidate acceptance
+        env:
+          CHIRP_AUTH_SERVICE_BIN: bins/jot-candidate-chirp/chirp-service
+          GRANITE_SERVICE_BIN: bins/jot-candidate-granite/granite-service
+          DRIVE_SERVICE_BIN: bins/jot-candidate-drive/drive-service
+          JOT_JOURNEY_BIN: bins/jot-candidate-jot/journey_server
+          JOT_JOURNEY_REVISIONS: bins/jot-candidate-revisions/revisions.json
+        run: |
+          set -euo pipefail
+          for service in chirp granite drive jot; do
+            (cd "bins/jot-candidate-$service" && sha256sum --check SHA256SUMS)
+          done
+          chmod +x "$CHIRP_AUTH_SERVICE_BIN" "$GRANITE_SERVICE_BIN" "$DRIVE_SERVICE_BIN" "$JOT_JOURNEY_BIN"
+          node web/scripts/candidate-journey.mjs
+      - name: Publish sanitized evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jot-candidate-report
+          path: web/test-results/candidate-journey/report.json
+          if-no-files-found: error
+          retention-days: 14
