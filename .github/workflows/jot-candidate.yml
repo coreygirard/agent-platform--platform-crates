@@ -112,6 +112,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: jot-acceptance-${{ matrix.name }}
+      - uses: actions/setup-node@v4
+        if: matrix.name == 'jot'
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
       - name: Build the real router
         env:
           SERVICE: ${{ matrix.name }}
@@ -130,6 +136,11 @@ jobs:
           cp "$source_path" "out/$BINARY"
           strip "out/$BINARY"
           (cd out && sha256sum "$BINARY" > SHA256SUMS)
+          if [ "$SERVICE" = jot ]; then
+            npm --prefix web ci
+            npm --prefix web run build
+            cp -R web/dist out/web
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: jot-candidate-${{ matrix.name }}
@@ -152,7 +163,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: stackwell-labs/jot
-          ref: ${{ needs.resolve.outputs.jot }}
+          # The candidate cannot silently replace its own acceptance harness.
+          # Its router and web bundle are built separately above.
+          ref: ${{ inputs.jot-ref }}
           token: ${{ steps.token.outputs.token }}
           persist-credentials: false
       - uses: actions/download-artifact@v4
@@ -166,7 +179,7 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm --prefix web ci
       - run: cd web && npx playwright install --with-deps chromium
-      - run: npm --prefix web run build
+      - run: mkdir -p web/dist && cp -R bins/jot-candidate-jot/web/. web/dist/
       - name: Run candidate acceptance
         env:
           CHIRP_AUTH_SERVICE_BIN: bins/jot-candidate-chirp/chirp-service
